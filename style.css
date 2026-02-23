@@ -141,7 +141,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 2; stroke-
 }
 
 .brand-mark {
-  width: 120px; height: 120px; overflow: hidden; border-radius: 16px;
+  width: 192px; height: 192px; overflow: hidden; border-radius: 16px;
   filter: drop-shadow(0 0 24px rgba(124,108,248,.5));
   animation: breathe 4s ease-in-out infinite;
 }
