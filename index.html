@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0a0a0f" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#f0f2f7" media="(prefers-color-scheme: light)" />
+  <meta name="description" content="Hades 2.1 — Gestor de contraseñas seguro con cifrado local" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Hades" />
+  <title>Hades 2.1</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="theme-dark" data-page="unlock">
+
+  <!-- ═══════════════ SPLASH / UNLOCK ═══════════════ -->
+  <div id="page-unlock" class="page active">
+    <div class="unlock-bg">
+      <div class="orb orb-1"></div>
+      <div class="orb orb-2"></div>
+      <div class="orb orb-3"></div>
+    </div>
+    <div class="unlock-center">
+      <div class="brand-mark">
+        <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M32 4C18.7 4 8 14.7 8 28v4h6v-4C14 18 22 10 32 10s18 8 18 18v4h6v-4C56 14.7 45.3 4 32 4Z" fill="url(#g1)"/>
+          <rect x="6" y="32" width="52" height="28" rx="8" fill="url(#g2)"/>
+          <circle cx="32" cy="46" r="6" fill="white" opacity="0.9"/>
+          <defs>
+            <linearGradient id="g1" x1="8" y1="4" x2="56" y2="32" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#7c6cf8"/>
+              <stop offset="1" stop-color="#38bdf8"/>
+            </linearGradient>
+            <linearGradient id="g2" x1="6" y1="32" x2="58" y2="60" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#7c6cf8"/>
+              <stop offset="1" stop-color="#ec4899"/>
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+      <h1 class="brand-title">Hades <span>2.1</span></h1>
+      <p class="brand-sub">Gestor de contraseñas cifrado</p>
+
+      <div id="unlock-form-wrapper" class="glass-card unlock-card">
+        <div id="unlock-first-time" class="hidden">
+          <h2>Configurar Hades</h2>
+          <p class="form-hint">Crea una contraseña maestra para proteger tus datos. <strong>No la olvides</strong> — no existe recuperación.</p>
+          <div class="field-group">
+            <label>Contraseña maestra</label>
+            <div class="glass-input-wrap">
+              <input type="password" id="mp-new" placeholder="Mínimo 8 caracteres" autocomplete="new-password" />
+              <button class="eye-btn" data-target="mp-new">
+                <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="field-group">
+            <label>Confirmar contraseña</label>
+            <div class="glass-input-wrap">
+              <input type="password" id="mp-confirm" placeholder="Repite la contraseña" autocomplete="new-password" />
+              <button class="eye-btn" data-target="mp-confirm">
+                <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="strength-bar-wrap hidden" id="strength-wrap">
+            <div class="strength-bar"><div id="strength-fill"></div></div>
+            <span id="strength-label"></span>
+          </div>
+          <button class="btn-primary" id="btn-setup">Crear bóveda</button>
+        </div>
+
+        <div id="unlock-existing" class="hidden">
+          <h2>Desbloquear bóveda</h2>
+          <p class="form-hint">Ingresa tu contraseña maestra para acceder.</p>
+          <div class="field-group">
+            <label>Contraseña maestra</label>
+            <div class="glass-input-wrap">
+              <input type="password" id="mp-enter" placeholder="••••••••" autocomplete="current-password" />
+              <button class="eye-btn" data-target="mp-enter">
+                <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+          </div>
+          <p id="unlock-error" class="error-msg hidden">Contraseña incorrecta</p>
+          <button class="btn-primary" id="btn-unlock">Entrar</button>
+          <button class="btn-ghost danger" id="btn-reset-vault">Eliminar bóveda y empezar de nuevo</button>
+        </div>
+      </div>
+
+      <div class="unlock-footer">
+        <button class="theme-toggle-small" id="theme-toggle-unlock" title="Cambiar tema">
+          <svg id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          <svg id="icon-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════ MAIN APP ═══════════════ -->
+  <div id="page-app" class="page hidden">
+    <!-- Sidebar -->
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-brand">
+        <svg class="sidebar-logo" viewBox="0 0 64 64" fill="none">
+          <path d="M32 4C18.7 4 8 14.7 8 28v4h6v-4C14 18 22 10 32 10s18 8 18 18v4h6v-4C56 14.7 45.3 4 32 4Z" fill="url(#sg1)"/>
+          <rect x="6" y="32" width="52" height="28" rx="8" fill="url(#sg2)"/>
+          <circle cx="32" cy="46" r="6" fill="white" opacity="0.9"/>
+          <defs>
+            <linearGradient id="sg1" x1="8" y1="4" x2="56" y2="32" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#7c6cf8"/><stop offset="1" stop-color="#38bdf8"/>
+            </linearGradient>
+            <linearGradient id="sg2" x1="6" y1="32" x2="58" y2="60" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#7c6cf8"/><stop offset="1" stop-color="#ec4899"/>
+            </linearGradient>
+          </defs>
+        </svg>
+        <span>Hades <strong>2.1</strong></span>
+      </div>
+
+      <nav class="sidebar-nav">
+        <button class="nav-item active" data-view="vault">
+          <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <span>Bóveda</span>
+        </button>
+        <button class="nav-item" data-view="generator">
+          <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span>Generador</span>
+        </button>
+        <button class="nav-item" data-view="settings">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Ajustes</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <button class="nav-item" id="btn-lock">
+          <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+          <span>Bloquear</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main-content">
+      <!-- Top bar -->
+      <header class="topbar">
+        <button id="sidebar-toggle" class="icon-btn">
+          <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
+        <div class="topbar-title" id="view-title">Bóveda</div>
+        <div class="topbar-actions">
+          <button class="theme-toggle-small" id="theme-toggle-app" title="Cambiar tema">
+            <svg id="icon-sun2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            <svg id="icon-moon2" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- ── VIEW: VAULT ── -->
+      <div id="view-vault" class="view active">
+        <div class="view-header">
+          <div class="glass-input-wrap search-bar">
+            <svg viewBox="0 0 24 24" class="search-icon"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="search-input" placeholder="Buscar proyectos..." />
+          </div>
+          <button class="btn-primary" id="btn-add-entry">
+            <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Agregar
+          </button>
+        </div>
+
+        <div id="category-tabs" class="category-tabs">
+          <button class="tab active" data-cat="all">Todos</button>
+          <button class="tab" data-cat="login">Logins</button>
+          <button class="tab" data-cat="card">Tarjetas</button>
+          <button class="tab" data-cat="note">Notas</button>
+          <button class="tab" data-cat="identity">Identidad</button>
+        </div>
+
+        <div id="entries-grid" class="entries-grid">
+          <!-- entries injected here -->
+        </div>
+
+        <div id="empty-state" class="empty-state hidden">
+          <div class="empty-icon">
+            <svg viewBox="0 0 64 64"><path d="M32 6C18.7 6 8 16.7 8 30v6h6v-6C14 20 22 12 32 12s18 8 18 18v6h6v-6C56 16.7 45.3 6 32 6Z" fill="currentColor" opacity=".3"/><rect x="6" y="36" width="52" height="24" rx="8" fill="currentColor" opacity=".2"/></svg>
+          </div>
+          <h3>Bóveda vacía</h3>
+          <p>Agrega tu primera entrada para comenzar</p>
+          <button class="btn-primary" id="btn-add-first">Agregar entrada</button>
+        </div>
+      </div>
+
+      <!-- ── VIEW: GENERATOR ── -->
+      <div id="view-generator" class="view hidden">
+        <div class="gen-container">
+          <div class="glass-card gen-card">
+            <h2>Generador de contraseñas</h2>
+            <div class="gen-output-wrap">
+              <div class="gen-output" id="gen-output">haz clic en generar</div>
+              <button class="icon-btn" id="btn-copy-gen" title="Copiar">
+                <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              </button>
+            </div>
+
+            <div class="gen-controls">
+              <div class="gen-row">
+                <label>Longitud: <strong id="len-val">16</strong></label>
+                <input type="range" id="gen-length" min="8" max="64" value="16" />
+              </div>
+              <div class="gen-checkboxes">
+                <label class="glass-checkbox"><input type="checkbox" id="use-upper" checked /><span class="checkmark"></span>Mayúsculas (A–Z)</label>
+                <label class="glass-checkbox"><input type="checkbox" id="use-lower" checked /><span class="checkmark"></span>Minúsculas (a–z)</label>
+                <label class="glass-checkbox"><input type="checkbox" id="use-numbers" checked /><span class="checkmark"></span>Números (0–9)</label>
+                <label class="glass-checkbox"><input type="checkbox" id="use-symbols" checked /><span class="checkmark"></span>Símbolos (!@#$)</label>
+              </div>
+              <div class="strength-bar-wrap">
+                <div class="strength-bar"><div id="gen-strength-fill"></div></div>
+                <span id="gen-strength-label">—</span>
+              </div>
+            </div>
+            <button class="btn-primary full-width" id="btn-generate">Generar contraseña</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── VIEW: SETTINGS ── -->
+      <div id="view-settings" class="view hidden">
+        <div class="settings-container">
+          <div class="glass-card settings-card">
+            <h2>Apariencia</h2>
+            <div class="setting-row">
+              <div>
+                <div class="setting-label">Tema</div>
+                <div class="setting-sub">Elige entre claro y oscuro</div>
+              </div>
+              <div class="theme-switcher">
+                <button class="theme-btn" id="theme-light-btn">
+                  <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+                  Claro
+                </button>
+                <button class="theme-btn" id="theme-dark-btn">
+                  <svg viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                  Oscuro
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="glass-card settings-card">
+            <h2>Seguridad</h2>
+            <div class="setting-row">
+              <div>
+                <div class="setting-label">Auto-bloqueo</div>
+                <div class="setting-sub">Bloquear tras inactividad</div>
+              </div>
+              <select class="glass-select" id="auto-lock-select">
+                <option value="0">Desactivado</option>
+                <option value="60">1 minuto</option>
+                <option value="300" selected>5 minutos</option>
+                <option value="900">15 minutos</option>
+                <option value="1800">30 minutos</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <div>
+                <div class="setting-label">Cambiar contraseña maestra</div>
+                <div class="setting-sub">Requiere la contraseña actual</div>
+              </div>
+              <button class="btn-secondary" id="btn-change-master">Cambiar</button>
+            </div>
+          </div>
+
+          <div class="glass-card settings-card">
+            <h2>Datos</h2>
+            <div class="setting-row">
+              <div>
+                <div class="setting-label">Exportar bóveda</div>
+                <div class="setting-sub">Descarga un backup cifrado JSON</div>
+              </div>
+              <button class="btn-secondary" id="btn-export">Exportar</button>
+            </div>
+            <div class="setting-row">
+              <div>
+                <div class="setting-label">Importar bóveda</div>
+                <div class="setting-sub">Carga un backup cifrado JSON</div>
+              </div>
+              <button class="btn-secondary" id="btn-import">Importar</button>
+              <input type="file" id="import-file" accept=".json" class="hidden" />
+            </div>
+          </div>
+
+          <div class="glass-card settings-card danger-card">
+            <h2>Zona peligrosa</h2>
+            <div class="setting-row">
+              <div>
+                <div class="setting-label">Eliminar bóveda</div>
+                <div class="setting-sub">Elimina todos los datos permanentemente</div>
+              </div>
+              <button class="btn-danger" id="btn-delete-vault">Eliminar</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ═══════════════ MODALS ═══════════════ -->
+
+  <!-- Entry Modal -->
+  <div id="modal-entry" class="modal-overlay hidden">
+    <div class="glass-card modal-card" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2 id="modal-entry-title">Nueva entrada</h2>
+        <button class="icon-btn" id="modal-entry-close">
+          <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="field-group">
+          <label>Tipo</label>
+          <select class="glass-select" id="entry-type">
+            <option value="login">Login</option>
+            <option value="card">Tarjeta</option>
+            <option value="note">Nota segura</option>
+            <option value="identity">Identidad</option>
+          </select>
+        </div>
+
+        <!-- Login fields -->
+        <div id="fields-login">
+          <div class="field-group"><label>Nombre del sitio / App</label><div class="glass-input-wrap"><input type="text" id="f-name" placeholder="Google, GitHub, Netflix…" /></div></div>
+          <div class="field-group"><label>URL</label><div class="glass-input-wrap"><input type="url" id="f-url" placeholder="https://…" /></div></div>
+          <div class="field-group"><label>Usuario / Email</label><div class="glass-input-wrap"><input type="text" id="f-username" placeholder="usuario@ejemplo.com" autocomplete="off" /></div></div>
+          <div class="field-group"><label>Contraseña</label>
+            <div class="glass-input-wrap">
+              <input type="password" id="f-password" placeholder="••••••••" autocomplete="off" />
+              <button class="eye-btn" data-target="f-password"><svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+              <button class="gen-mini-btn" id="btn-gen-quick" title="Generar">
+                <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="field-group"><label>Notas</label><textarea class="glass-textarea" id="f-notes" placeholder="Notas opcionales…" rows="3"></textarea></div>
+        </div>
+
+        <!-- Card fields -->
+        <div id="fields-card" class="hidden">
+          <div class="field-group"><label>Nombre en la tarjeta</label><div class="glass-input-wrap"><input type="text" id="c-name" placeholder="John Doe" /></div></div>
+          <div class="field-group"><label>Número de tarjeta</label><div class="glass-input-wrap"><input type="text" id="c-number" placeholder="•••• •••• •••• ••••" maxlength="19" /></div></div>
+          <div class="field-row">
+            <div class="field-group"><label>Vencimiento</label><div class="glass-input-wrap"><input type="text" id="c-expiry" placeholder="MM/AA" maxlength="5" /></div></div>
+            <div class="field-group"><label>CVV</label><div class="glass-input-wrap"><input type="password" id="c-cvv" placeholder="•••" maxlength="4" /></div></div>
+          </div>
+          <div class="field-group"><label>Notas</label><textarea class="glass-textarea" id="c-notes" placeholder="Notas opcionales…" rows="2"></textarea></div>
+        </div>
+
+        <!-- Note fields -->
+        <div id="fields-note" class="hidden">
+          <div class="field-group"><label>Título</label><div class="glass-input-wrap"><input type="text" id="n-title" placeholder="Título de la nota" /></div></div>
+          <div class="field-group"><label>Contenido</label><textarea class="glass-textarea" id="n-content" placeholder="Tu nota segura…" rows="6"></textarea></div>
+        </div>
+
+        <!-- Identity fields -->
+        <div id="fields-identity" class="hidden">
+          <div class="field-row">
+            <div class="field-group"><label>Nombre</label><div class="glass-input-wrap"><input type="text" id="i-first" placeholder="Nombre" /></div></div>
+            <div class="field-group"><label>Apellido</label><div class="glass-input-wrap"><input type="text" id="i-last" placeholder="Apellido" /></div></div>
+          </div>
+          <div class="field-group"><label>Email</label><div class="glass-input-wrap"><input type="email" id="i-email" placeholder="correo@ejemplo.com" /></div></div>
+          <div class="field-group"><label>Teléfono</label><div class="glass-input-wrap"><input type="tel" id="i-phone" placeholder="+56 9 1234 5678" /></div></div>
+          <div class="field-group"><label>Dirección</label><textarea class="glass-textarea" id="i-address" placeholder="Dirección completa…" rows="2"></textarea></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-ghost" id="modal-entry-cancel">Cancelar</button>
+        <button class="btn-primary" id="modal-entry-save">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- View Entry Modal -->
+  <div id="modal-view" class="modal-overlay hidden">
+    <div class="glass-card modal-card" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2 id="view-entry-name">—</h2>
+        <button class="icon-btn" id="modal-view-close">
+          <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body" id="view-entry-body"></div>
+      <div class="modal-footer">
+        <button class="btn-danger-ghost" id="btn-delete-entry">Eliminar</button>
+        <button class="btn-secondary" id="btn-edit-entry">Editar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm Modal -->
+  <div id="modal-confirm" class="modal-overlay hidden">
+    <div class="glass-card modal-card small" role="dialog" aria-modal="true">
+      <div class="modal-header"><h2 id="confirm-title">¿Confirmar?</h2></div>
+      <div class="modal-body"><p id="confirm-msg"></p></div>
+      <div class="modal-footer">
+        <button class="btn-ghost" id="confirm-cancel">Cancelar</button>
+        <button class="btn-danger" id="confirm-ok">Confirmar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Change Master Modal -->
+  <div id="modal-change-master" class="modal-overlay hidden">
+    <div class="glass-card modal-card" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2>Cambiar contraseña maestra</h2>
+        <button class="icon-btn" id="modal-cm-close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <div class="field-group"><label>Contraseña actual</label><div class="glass-input-wrap"><input type="password" id="cm-current" placeholder="••••••••" /></div></div>
+        <div class="field-group"><label>Nueva contraseña</label><div class="glass-input-wrap"><input type="password" id="cm-new" placeholder="Mínimo 8 caracteres" /></div></div>
+        <div class="field-group"><label>Confirmar nueva</label><div class="glass-input-wrap"><input type="password" id="cm-confirm" placeholder="Repetir nueva contraseña" /></div></div>
+        <p id="cm-error" class="error-msg hidden"></p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-ghost" id="modal-cm-cancel">Cancelar</button>
+        <button class="btn-primary" id="btn-cm-save">Cambiar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast hidden" role="alert" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
