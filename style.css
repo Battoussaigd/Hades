@@ -141,9 +141,13 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 2; stroke-
 }
 
 .brand-mark {
-  width: 72px; height: 72px;
+  width: 72px; height: 72px; overflow: hidden; border-radius: 16px;
   filter: drop-shadow(0 0 24px rgba(124,108,248,.5));
   animation: breathe 4s ease-in-out infinite;
+}
+
+.brand-mark img {
+  width: 100%; height: 100%; object-fit: cover;
 }
 @keyframes breathe {
   0%,100% { filter: drop-shadow(0 0 24px rgba(124,108,248,.5)); }
