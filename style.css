@@ -992,3 +992,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 2; stroke-
   z-index: 99;
 }
 .sidebar-overlay.show { display: block; }
+
+#unlock-existing .btn-primary {
+  margin-top: 16px;
+}
