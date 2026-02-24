@@ -218,6 +218,8 @@ function enterApp() {
   loadAutoLockSetting();
   renderVault();
   resetAutoLock();
+  // Inicializar historial con la vista vault
+  history.replaceState({ view: 'vault' }, '', '');
   document.addEventListener('mousemove', resetAutoLock, { passive: true });
   document.addEventListener('keydown', resetAutoLock, { passive: true });
   document.addEventListener('touchstart', resetAutoLock, { passive: true });
@@ -232,18 +234,41 @@ const VIEW_TITLES = {
   about: 'Acerca de'
 };
 
-function switchView(view) {
+function switchView(view, pushHistory = true) {
   State.currentView = view;
   ALL_VIEWS.forEach(v => {
     $(`view-${v}`)?.classList.toggle('hidden', v !== view);
     document.querySelector(`.nav-item[data-view="${v}"]`)?.classList.toggle('active', v === view);
   });
   $('view-title').textContent = VIEW_TITLES[view] || '';
+  // Agregar al historial del navegador para que el botón de retroceso funcione
+  if (pushHistory) {
+    history.pushState({ view }, '', '');
+  }
   if (window.innerWidth <= 768) {
     $('sidebar').classList.remove('open');
     document.querySelector('.sidebar-overlay')?.classList.remove('show');
   }
 }
+
+// Escuchar el botón de retroceso del navegador/smartphone
+window.addEventListener('popstate', (e) => {
+  const view = e.state?.view || 'vault';
+  // Si hay modales abiertos, cerrarlos primero
+  const modals = ['modal-entry', 'modal-view', 'modal-confirm', 'modal-change-master'];
+  const openModal = modals.find(m => !$( m)?.classList.contains('hidden'));
+  if (openModal) {
+    $(openModal).classList.add('hidden');
+    // Volver a agregar el estado actual para no perder la vista
+    history.pushState({ view: State.currentView }, '', '');
+    return;
+  }
+  // Si estamos en vault y presionan retroceso, dejar que la app se minimice
+  if (view === 'vault' && State.currentView === 'vault') return;
+  // Si no, cambiar a la vista del historial sin agregar nueva entrada
+  switchView(view, false);
+});
+
 // ── VAULT RENDER ──────────────────────────────────────
 function renderVault() {
   const search = $('search-input')?.value.toLowerCase() || '';
@@ -305,6 +330,7 @@ function openAddModal(prefill = null) {
   $('modal-entry-title').textContent = isEdit ? 'Editar entrada' : 'Nueva entrada';
   clearEntryForm();
   $('modal-entry').classList.remove('hidden');
+  history.pushState({ view: State.currentView, modal: 'entry' }, '', '');
   if (isEdit) {
     $('entry-type').value = prefill.type || 'login';
     switchEntryType(prefill.type || 'login');
@@ -433,6 +459,7 @@ function openViewModal(id) {
     text('Dirección', e.address);
   }
   $('modal-view').classList.remove('hidden');
+  history.pushState({ view: State.currentView, modal: 'view' }, '', '');
   body.querySelectorAll('.copy-btn[data-copy]').forEach(btn => {
     on(btn, 'click', e2 => {
       e2.stopPropagation();
@@ -570,11 +597,9 @@ function bindEvents() {
   on($('theme-toggle-app'), 'click', toggleTheme);
   on($('theme-light-btn'), 'click', () => applyTheme('light'));
   on($('theme-dark-btn'), 'click', () => applyTheme('dark'));
-  // Sidebar navigation — ahora incluye help y about
   document.querySelectorAll('.nav-item[data-view]').forEach(btn => {
     on(btn, 'click', () => switchView(btn.dataset.view));
   });
-  // Mobile sidebar
   const overlay = document.createElement('div');
   overlay.className = 'sidebar-overlay';
   document.body.appendChild(overlay);
@@ -604,9 +629,9 @@ function bindEvents() {
     showToast('Contraseña generada');
   });
   on($('modal-entry-save'), 'click', saveEntry);
-  on($('modal-entry-close'), 'click', () => $('modal-entry').classList.add('hidden'));
-  on($('modal-entry-cancel'), 'click', () => $('modal-entry').classList.add('hidden'));
-  on($('modal-view-close'), 'click', () => $('modal-view').classList.add('hidden'));
+  on($('modal-entry-close'), 'click', () => { $('modal-entry').classList.add('hidden'); history.back(); });
+  on($('modal-entry-cancel'), 'click', () => { $('modal-entry').classList.add('hidden'); history.back(); });
+  on($('modal-view-close'), 'click', () => { $('modal-view').classList.add('hidden'); history.back(); });
   on($('btn-delete-entry'), 'click', () => deleteEntry(State.editingId));
   on($('btn-edit-entry'), 'click', () => {
     $('modal-view').classList.add('hidden');
