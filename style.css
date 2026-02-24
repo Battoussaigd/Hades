@@ -37,9 +37,9 @@
   --input-border: rgba(255,255,255,.1);
   --nav-active-bg: rgba(124,108,248,.18);
   --card-tag-bg: rgba(124,108,248,.15);
-  --orb1: radial-gradient(circle, rgba(124,108,248,.35) 0%, transparent 70%);
-  --orb2: radial-gradient(circle, rgba(56,189,248,.3) 0%, transparent 70%);
-  --orb3: radial-gradient(circle, rgba(236,72,153,.25) 0%, transparent 70%);
+  --orb1: radial-gradient(circle, rgba(180,0,0,.45) 0%, transparent 70%);
+  --orb2: radial-gradient(circle, rgba(120,0,0,.35) 0%, transparent 70%);
+  --orb3: radial-gradient(circle, rgba(255,30,30,.25) 0%, transparent 70%);
   --sidebar-bg: rgba(10,10,20,.85);
 }
 
@@ -60,9 +60,9 @@
   --input-border: rgba(140,140,200,.3);
   --nav-active-bg: rgba(124,108,248,.12);
   --card-tag-bg: rgba(124,108,248,.1);
-  --orb1: radial-gradient(circle, rgba(124,108,248,.15) 0%, transparent 70%);
-  --orb2: radial-gradient(circle, rgba(56,189,248,.12) 0%, transparent 70%);
-  --orb3: radial-gradient(circle, rgba(236,72,153,.1) 0%, transparent 70%);
+  --orb1: radial-gradient(circle, rgba(0,180,255,.2) 0%, transparent 70%);
+  --orb2: radial-gradient(circle, rgba(0,140,220,.15) 0%, transparent 70%);
+  --orb3: radial-gradient(circle, rgba(100,210,255,.12) 0%, transparent 70%);
   --sidebar-bg: rgba(240,242,250,.9);
 }
 
@@ -507,7 +507,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 2; stroke-
   margin-bottom: 8px;
   color: var(--text);
 }
-.sidebar-logo { width: 32px; height: 32px; }
+.sidebar-logo { width: 32px; height: 32px; border-radius: 8px; object-fit: cover; }
 .sidebar-brand strong { color: var(--accent); }
 
 .sidebar-nav { flex: 1; display: flex; flex-direction: column; gap: 4px; }
@@ -784,7 +784,6 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 2; stroke-
 }
 .settings-card h2 {
   font-family: var(--font-display);
-  font-size: 1rem;
   font-weight: 700;
   color: var(--text2);
   text-transform: uppercase;
