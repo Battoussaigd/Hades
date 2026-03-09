@@ -633,10 +633,10 @@ function bindEvents() {
   on(overlay, 'click', () => { $('sidebar').classList.remove('open'); overlay.classList.remove('show'); });
   on($('btn-lock'), 'click', lockApp);
   // Home menu cards
-  on($('home-btn-vault'), 'click', () => goToApp('vault'));
-  on($('home-btn-add'), 'click', () => { goToApp('vault'); openAddModal(); });
-  on($('home-btn-backup'), 'click', () => goToApp('settings'));
-  on($('home-btn-settings'), 'click', () => goToApp('settings'));
+  on($('home-btn-vault'),     'click', () => goToApp('vault'));
+  on($('home-btn-generator'), 'click', () => goToApp('generator'));
+  on($('home-btn-settings'),  'click', () => goToApp('settings'));
+  on($('home-btn-help'),      'click', () => goToApp('help'));
   on($('search-input'), 'input', renderVault);
   $('category-tabs')?.querySelectorAll('.tab').forEach(tab => {
     on(tab, 'click', () => {
