@@ -152,6 +152,7 @@ function lockApp() {
   State.entries = [];
   clearTimeout(State.autoLockTimer);
   $('page-app').classList.add('hidden');
+  $('page-home').classList.add('hidden');
   $('page-unlock').classList.remove('hidden');
   document.body.dataset.page = 'unlock';
   $('mp-enter')?.focus();
@@ -213,16 +214,31 @@ async function initUnlockScreen() {
 }
 function enterApp() {
   $('page-unlock').classList.add('hidden');
-  $('page-app').classList.remove('hidden');
-  document.body.dataset.page = 'app';
+  $('page-home').classList.remove('hidden');
+  $('page-app').classList.add('hidden');
+  document.body.dataset.page = 'home';
   loadAutoLockSetting();
-  renderVault();
   resetAutoLock();
-  // Inicializar historial con la vista vault
-  history.replaceState({ view: 'vault' }, '', '');
+  history.replaceState({ page: 'home' }, '', '');
   document.addEventListener('mousemove', resetAutoLock, { passive: true });
   document.addEventListener('keydown', resetAutoLock, { passive: true });
   document.addEventListener('touchstart', resetAutoLock, { passive: true });
+}
+
+function goToApp(view) {
+  $('page-home').classList.add('hidden');
+  $('page-app').classList.remove('hidden');
+  document.body.dataset.page = 'app';
+  renderVault();
+  switchView(view);
+  history.pushState({ page: 'app', view }, '', '');
+}
+
+function goHome() {
+  $('page-app').classList.add('hidden');
+  $('page-home').classList.remove('hidden');
+  document.body.dataset.page = 'home';
+  history.pushState({ page: 'home' }, '', '');
 }
 // ── VIEWS ─────────────────────────────────────────────
 const ALL_VIEWS = ['vault', 'generator', 'settings', 'help', 'about'];
@@ -253,19 +269,24 @@ function switchView(view, pushHistory = true) {
 
 // Escuchar el botón de retroceso del navegador/smartphone
 window.addEventListener('popstate', (e) => {
+  const page = e.state?.page || 'home';
   const view = e.state?.view || 'vault';
   // Si hay modales abiertos, cerrarlos primero
   const modals = ['modal-entry', 'modal-view', 'modal-confirm', 'modal-change-master'];
-  const openModal = modals.find(m => !$( m)?.classList.contains('hidden'));
+  const openModal = modals.find(m => !$(m)?.classList.contains('hidden'));
   if (openModal) {
     $(openModal).classList.add('hidden');
-    // Volver a agregar el estado actual para no perder la vista
-    history.pushState({ view: State.currentView }, '', '');
+    history.pushState({ page: 'app', view: State.currentView }, '', '');
     return;
   }
-  // Si estamos en vault y presionan retroceso, dejar que la app se minimice
-  if (view === 'vault' && State.currentView === 'vault') return;
-  // Si no, cambiar a la vista del historial sin agregar nueva entrada
+  // Si estamos en la app y el historial dice home, volver al home
+  if (page === 'home' && document.body.dataset.page === 'app') {
+    goHome();
+    return;
+  }
+  // Si estamos en home y presionan retroceso, dejar que minimice
+  if (page === 'home' && document.body.dataset.page === 'home') return;
+  // Navegar entre vistas dentro de la app
   switchView(view, false);
 });
 
@@ -594,6 +615,8 @@ async function changeMasterPassword() {
 // ── BIND EVENTS ───────────────────────────────────────
 function bindEvents() {
   on($('theme-toggle-unlock'), 'click', toggleTheme);
+  on($('theme-toggle-home'), 'click', toggleTheme);
+  on($('btn-lock-home'), 'click', lockApp);
   on($('theme-toggle-app'), 'click', toggleTheme);
   on($('theme-light-btn'), 'click', () => applyTheme('light'));
   on($('theme-dark-btn'), 'click', () => applyTheme('dark'));
@@ -609,6 +632,11 @@ function bindEvents() {
   });
   on(overlay, 'click', () => { $('sidebar').classList.remove('open'); overlay.classList.remove('show'); });
   on($('btn-lock'), 'click', lockApp);
+  // Home menu cards
+  on($('home-btn-vault'), 'click', () => goToApp('vault'));
+  on($('home-btn-add'), 'click', () => { goToApp('vault'); openAddModal(); });
+  on($('home-btn-backup'), 'click', () => goToApp('settings'));
+  on($('home-btn-settings'), 'click', () => goToApp('settings'));
   on($('search-input'), 'input', renderVault);
   $('category-tabs')?.querySelectorAll('.tab').forEach(tab => {
     on(tab, 'click', () => {
