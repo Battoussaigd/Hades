@@ -90,35 +90,68 @@ const Crypto = {
 
 // ── BIOMETRIC ENGINE ──────────────────────────────────
 const Biometric = {
+  // ── Helpers ──
   isSupported() {
     return window.PublicKeyCredential !== undefined &&
            typeof navigator.credentials?.create === 'function';
   },
-  getMode() {
-    return localStorage.getItem('hades_biometric_mode') || 'off';
-  },
-  setMode(mode) {
-    localStorage.setItem('hades_biometric_mode', mode);
-  },
-  getCredentialId() {
-    return localStorage.getItem(Crypto.BIOMETRIC_KEY);
-  },
-  saveCredentialId(id) {
-    localStorage.setItem(Crypto.BIOMETRIC_KEY, id);
-  },
-  clearCredentialId() {
+  getMode() { return localStorage.getItem('hades_biometric_mode') || 'off'; },
+  setMode(mode) { localStorage.setItem('hades_biometric_mode', mode); },
+  getCredentialId() { return localStorage.getItem(Crypto.BIOMETRIC_KEY); },
+  saveCredentialId(id) { localStorage.setItem(Crypto.BIOMETRIC_KEY, id); },
+  clearAll() {
     localStorage.removeItem(Crypto.BIOMETRIC_KEY);
+    localStorage.removeItem('hades_biometric_pw');
+    localStorage.removeItem('hades_biometric_mode');
   },
-  // Convierte ArrayBuffer a Base64
-  bufToB64(buf) {
-    return btoa(String.fromCharCode(...new Uint8Array(buf)));
+  bufToB64(buf) { return btoa(String.fromCharCode(...new Uint8Array(buf))); },
+  b64ToBuf(b64) { return Uint8Array.from(atob(b64), c => c.charCodeAt(0)); },
+
+  // ── Cifra la contraseña maestra con AES usando el credentialId como semilla ──
+  async encryptPassword(password, credentialId) {
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw', enc.encode(credentialId), 'PBKDF2', false, ['deriveKey']
+    );
+    const key = await crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: enc.encode('hades-bio-salt'), iterations: 100000, hash: 'SHA-256' },
+      keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt']
+    );
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const buf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(password));
+    const combined = new Uint8Array(12 + buf.byteLength);
+    combined.set(iv);
+    combined.set(new Uint8Array(buf), 12);
+    return btoa(String.fromCharCode(...combined));
   },
-  // Convierte Base64 a Uint8Array
-  b64ToBuf(b64) {
-    return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+
+  // ── Descifra la contraseña maestra ──
+  async decryptPassword(encrypted, credentialId) {
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw', enc.encode(credentialId), 'PBKDF2', false, ['deriveKey']
+    );
+    const key = await crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: enc.encode('hades-bio-salt'), iterations: 100000, hash: 'SHA-256' },
+      keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
+    );
+    const raw = Uint8Array.from(atob(encrypted), c => c.charCodeAt(0));
+    const iv = raw.slice(0, 12);
+    const data = raw.slice(12);
+    const buf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data);
+    return new TextDecoder().decode(buf);
   },
-  // Registrar huella (primera vez)
-  async register() {
+
+  // ── Guardar contraseña maestra cifrada para acceso biométrico ──
+  async savePassword(password) {
+    const credId = this.getCredentialId();
+    if (!credId) throw new Error('No hay credencial registrada');
+    const encrypted = await this.encryptPassword(password, credId);
+    localStorage.setItem('hades_biometric_pw', encrypted);
+  },
+
+  // ── Registrar huella y guardar contraseña cifrada ──
+  async register(password) {
     if (!this.isSupported()) throw new Error('WebAuthn no soportado');
     const challenge = crypto.getRandomValues(new Uint8Array(32));
     const credential = await navigator.credentials.create({
@@ -131,8 +164,8 @@ const Biometric = {
           displayName: 'Hades User'
         },
         pubKeyCredParams: [
-          { type: 'public-key', alg: -7 },   // ES256
-          { type: 'public-key', alg: -257 }   // RS256
+          { type: 'public-key', alg: -7 },
+          { type: 'public-key', alg: -257 }
         ],
         authenticatorSelection: {
           authenticatorAttachment: 'platform',
@@ -142,30 +175,39 @@ const Biometric = {
         timeout: 60000
       }
     });
-    this.saveCredentialId(this.bufToB64(credential.rawId));
+    const credId = this.bufToB64(credential.rawId);
+    this.saveCredentialId(credId);
+    // Cifrar y guardar la contraseña maestra
+    const encrypted = await this.encryptPassword(password, credId);
+    localStorage.setItem('hades_biometric_pw', encrypted);
     return true;
   },
-  // Verificar huella
-  async verify() {
+
+  // ── Verificar huella y obtener la contraseña maestra descifrada ──
+  async verifyAndGetPassword() {
     if (!this.isSupported()) throw new Error('WebAuthn no soportado');
     const credId = this.getCredentialId();
+    if (!credId) throw new Error('No hay credencial registrada');
+    const encrypted = localStorage.getItem('hades_biometric_pw');
+    if (!encrypted) throw new Error('No hay contraseña guardada');
     const challenge = crypto.getRandomValues(new Uint8Array(32));
     const options = {
       publicKey: {
         challenge,
         userVerification: 'required',
-        timeout: 60000
+        timeout: 60000,
+        allowCredentials: [{
+          type: 'public-key',
+          id: this.b64ToBuf(credId),
+          transports: ['internal']
+        }]
       }
     };
-    if (credId) {
-      options.publicKey.allowCredentials = [{
-        type: 'public-key',
-        id: this.b64ToBuf(credId),
-        transports: ['internal']
-      }];
-    }
     const assertion = await navigator.credentials.get(options);
-    return !!assertion;
+    if (!assertion) throw new Error('Verificación fallida');
+    // Descifrar la contraseña con el credentialId
+    const password = await this.decryptPassword(encrypted, credId);
+    return password;
   }
 };
 // ── APP STATE ─────────────────────────────────────────
@@ -291,45 +333,29 @@ async function initUnlockScreen() {
       btn.classList.add('scanning');
       btn.disabled = true;
       try {
-        const ok = await Biometric.verify();
-        if (ok) {
-          // Biometría OK — desbloquear con contraseña guardada en sesión
-          // Si modo es 'both', pedir contraseña maestra además
-          const bioMode = Biometric.getMode();
-          if (bioMode === 'both') {
-            btn.classList.remove('scanning');
-            btn.disabled = false;
-            showToast('Huella verificada ✓ — ingresa tu contraseña');
-            $('mp-enter').closest('.field-group').classList.remove('hidden');
-            $('btn-unlock').classList.remove('hidden');
-            $('btn-biometric').classList.add('hidden');
-            $('biometric-hint').classList.add('hidden');
-            $('mp-enter').focus();
-            State._bioVerified = true;
+        // Obtiene la contraseña maestra directamente desde la huella
+        const password = await Biometric.verifyAndGetPassword();
+        const bioMode = Biometric.getMode();
+        if (bioMode === 'both') {
+          // Modo ambos: huella OK, ahora pedir contraseña maestra
+          btn.classList.remove('scanning');
+          btn.disabled = false;
+          showToast('Huella verificada ✓ — ingresa tu contraseña');
+          $('mp-enter').closest('.field-group').classList.remove('hidden');
+          $('btn-unlock').classList.remove('hidden');
+          $('btn-biometric').classList.add('hidden');
+          $('biometric-hint').classList.add('hidden');
+          $('mp-enter').focus();
+          State._bioVerified = true;
+        } else {
+          // Modo solo huella: usar contraseña descifrada directamente
+          const key = await Crypto.verifyPassword(password);
+          if (key) {
+            State.cryptoKey = key;
+            State.entries = await Crypto.loadVault(key);
+            enterApp();
           } else {
-            // Solo huella — necesitamos la clave derivada
-            // Pedimos la contraseña una sola vez para obtener la clave
-            const savedPw = sessionStorage.getItem('hades_session_pw');
-            if (savedPw) {
-              const key = await Crypto.verifyPassword(savedPw);
-              if (key) {
-                State.cryptoKey = key;
-                State.entries = await Crypto.loadVault(key);
-                sessionStorage.removeItem('hades_session_pw');
-                enterApp();
-                return;
-              }
-            }
-            // Si no hay contraseña en sesión, pedir una vez
-            btn.classList.remove('scanning');
-            btn.disabled = false;
-            showToast('Huella verificada ✓ — ingresa tu contraseña una vez');
-            $('mp-enter').closest('.field-group').classList.remove('hidden');
-            $('btn-unlock').classList.remove('hidden');
-            $('btn-biometric').classList.add('hidden');
-            $('biometric-hint').classList.add('hidden');
-            $('mp-enter').focus();
-            State._bioVerified = true;
+            throw new Error('Clave inválida');
           }
         }
       } catch (e) {
@@ -358,10 +384,6 @@ async function initUnlockScreen() {
         $('mp-enter').focus();
         State._bioVerified = false;
         return;
-      }
-      // Si modo biométrico 'biometric', guardar pw en sesión para próximos accesos
-      if (Biometric.getMode() === 'biometric') {
-        sessionStorage.setItem('hades_session_pw', pw);
       }
       State._bioVerified = false;
       State.cryptoKey = key;
@@ -898,10 +920,49 @@ function bindEvents() {
       showToast('Tu dispositivo no soporta biometría');
       return;
     }
+    // Necesitamos la contraseña maestra para cifrarla junto a la huella
+    const pw = await new Promise(resolve => {
+      const modal = document.createElement('div');
+      modal.className = 'modal-overlay';
+      modal.innerHTML = `
+        <div class="glass-card modal-card small">
+          <div class="modal-header"><h2>Confirmar contraseña</h2></div>
+          <div class="modal-body">
+            <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Ingresa tu contraseña maestra para vincularla con tu huella.</p>
+            <div class="field-group">
+              <div class="glass-input-wrap">
+                <input type="password" id="bio-pw-input" placeholder="Contraseña maestra" autocomplete="current-password" />
+              </div>
+            </div>
+            <p id="bio-pw-error" class="error-msg hidden">Contraseña incorrecta</p>
+          </div>
+          <div class="modal-footer">
+            <button class="btn-ghost" id="bio-pw-cancel">Cancelar</button>
+            <button class="btn-primary" id="bio-pw-confirm">Confirmar</button>
+          </div>
+        </div>`;
+      document.body.appendChild(modal);
+      setTimeout(() => modal.querySelector('#bio-pw-input').focus(), 100);
+      modal.querySelector('#bio-pw-cancel').onclick = () => { modal.remove(); resolve(null); };
+      modal.querySelector('#bio-pw-confirm').onclick = async () => {
+        const val = modal.querySelector('#bio-pw-input').value;
+        const testKey = await Crypto.verifyPassword(val);
+        if (!testKey) {
+          modal.querySelector('#bio-pw-error').classList.remove('hidden');
+          return;
+        }
+        modal.remove();
+        resolve(val);
+      };
+      modal.querySelector('#bio-pw-input').addEventListener('keydown', async e => {
+        if (e.key === 'Enter') modal.querySelector('#bio-pw-confirm').click();
+      });
+    });
+    if (!pw) return;
     try {
       $('btn-register-biometric').textContent = 'Registrando…';
       $('btn-register-biometric').disabled = true;
-      await Biometric.register();
+      await Biometric.register(pw);
       const mode = $('biometric-mode-select').value;
       Biometric.setMode(mode);
       $('biometric-register-row').classList.add('hidden');
