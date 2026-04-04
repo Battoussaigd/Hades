@@ -75,7 +75,11 @@
           </div>
           <p id="unlock-error" class="error-msg hidden">Contraseña incorrecta</p>
           <button class="btn-primary" id="btn-unlock">Entrar</button>
-
+          <button class="btn-biometric hidden" id="btn-biometric">
+            <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 0 1 10 10"/><path d="M12 6a6 6 0 0 1 6 6"/><path d="M12 10a2 2 0 0 1 2 2"/><path d="M2 12a10 10 0 0 0 10 10"/><path d="M6 12a6 6 0 0 0 6 6"/><path d="M10 12a2 2 0 0 0 2 2"/></svg>
+            Usar huella dactilar
+          </button>
+          <p class="biometric-hint hidden" id="biometric-hint">o ingresa tu contraseña maestra</p>
         </div>
       </div>
 
@@ -279,6 +283,24 @@
             <div class="setting-row">
               <div><div class="setting-label">Cambiar contraseña maestra</div><div class="setting-sub">Requiere la contraseña actual</div></div>
               <button class="btn-secondary" id="btn-change-master">Cambiar</button>
+            </div>
+            <div class="setting-row">
+              <div>
+                <div class="setting-label">Acceso biométrico</div>
+                <div class="setting-sub">Desbloquear con huella dactilar</div>
+              </div>
+              <select class="glass-select" id="biometric-mode-select">
+                <option value="off">Desactivado</option>
+                <option value="biometric">Solo huella</option>
+                <option value="both">Contraseña + Huella</option>
+              </select>
+            </div>
+            <div class="setting-row hidden" id="biometric-register-row">
+              <div>
+                <div class="setting-label">Registrar huella</div>
+                <div class="setting-sub">Configura tu huella para esta app</div>
+              </div>
+              <button class="btn-secondary" id="btn-register-biometric">Registrar</button>
             </div>
           </div>
           <div class="glass-card settings-card">

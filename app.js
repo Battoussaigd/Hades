@@ -9,6 +9,7 @@ const Crypto = {
   SALT_KEY: 'hades_salt',
   VAULT_KEY: 'hades_vault',
   META_KEY: 'hades_meta',
+  BIOMETRIC_KEY: 'hades_biometric_id',
   getSalt() {
     let salt = localStorage.getItem(this.SALT_KEY);
     if (!salt) {
@@ -84,6 +85,87 @@ const Crypto = {
     } catch {
       return null;
     }
+  }
+};
+
+// ── BIOMETRIC ENGINE ──────────────────────────────────
+const Biometric = {
+  isSupported() {
+    return window.PublicKeyCredential !== undefined &&
+           typeof navigator.credentials?.create === 'function';
+  },
+  getMode() {
+    return localStorage.getItem('hades_biometric_mode') || 'off';
+  },
+  setMode(mode) {
+    localStorage.setItem('hades_biometric_mode', mode);
+  },
+  getCredentialId() {
+    return localStorage.getItem(Crypto.BIOMETRIC_KEY);
+  },
+  saveCredentialId(id) {
+    localStorage.setItem(Crypto.BIOMETRIC_KEY, id);
+  },
+  clearCredentialId() {
+    localStorage.removeItem(Crypto.BIOMETRIC_KEY);
+  },
+  // Convierte ArrayBuffer a Base64
+  bufToB64(buf) {
+    return btoa(String.fromCharCode(...new Uint8Array(buf)));
+  },
+  // Convierte Base64 a Uint8Array
+  b64ToBuf(b64) {
+    return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  },
+  // Registrar huella (primera vez)
+  async register() {
+    if (!this.isSupported()) throw new Error('WebAuthn no soportado');
+    const challenge = crypto.getRandomValues(new Uint8Array(32));
+    const credential = await navigator.credentials.create({
+      publicKey: {
+        challenge,
+        rp: { name: 'Hades', id: location.hostname },
+        user: {
+          id: crypto.getRandomValues(new Uint8Array(16)),
+          name: 'hades-user',
+          displayName: 'Hades User'
+        },
+        pubKeyCredParams: [
+          { type: 'public-key', alg: -7 },   // ES256
+          { type: 'public-key', alg: -257 }   // RS256
+        ],
+        authenticatorSelection: {
+          authenticatorAttachment: 'platform',
+          userVerification: 'required',
+          residentKey: 'preferred'
+        },
+        timeout: 60000
+      }
+    });
+    this.saveCredentialId(this.bufToB64(credential.rawId));
+    return true;
+  },
+  // Verificar huella
+  async verify() {
+    if (!this.isSupported()) throw new Error('WebAuthn no soportado');
+    const credId = this.getCredentialId();
+    const challenge = crypto.getRandomValues(new Uint8Array(32));
+    const options = {
+      publicKey: {
+        challenge,
+        userVerification: 'required',
+        timeout: 60000
+      }
+    };
+    if (credId) {
+      options.publicKey.allowCredentials = [{
+        type: 'public-key',
+        id: this.b64ToBuf(credId),
+        transports: ['internal']
+      }];
+    }
+    const assertion = await navigator.credentials.get(options);
+    return !!assertion;
   }
 };
 // ── APP STATE ─────────────────────────────────────────
@@ -187,6 +269,81 @@ async function initUnlockScreen() {
       }
     });
   } else {
+    // Configurar pantalla según modo biométrico
+    const bioMode = Biometric.getMode();
+    const hasCredential = !!Biometric.getCredentialId();
+    if ((bioMode === 'biometric' || bioMode === 'both') && hasCredential && Biometric.isSupported()) {
+      $('btn-biometric').classList.remove('hidden');
+      $('biometric-hint').classList.remove('hidden');
+      if (bioMode === 'biometric') {
+        // Solo huella: ocultar formulario de contraseña
+        $('mp-enter').closest('.field-group').classList.add('hidden');
+        $('btn-unlock').classList.add('hidden');
+        $('biometric-hint').classList.add('hidden');
+      }
+      // Auto-trigger huella si modo es solo biométrico
+      if (bioMode === 'biometric') {
+        setTimeout(() => $('btn-biometric').click(), 400);
+      }
+    }
+    on($('btn-biometric'), 'click', async () => {
+      const btn = $('btn-biometric');
+      btn.classList.add('scanning');
+      btn.disabled = true;
+      try {
+        const ok = await Biometric.verify();
+        if (ok) {
+          // Biometría OK — desbloquear con contraseña guardada en sesión
+          // Si modo es 'both', pedir contraseña maestra además
+          const bioMode = Biometric.getMode();
+          if (bioMode === 'both') {
+            btn.classList.remove('scanning');
+            btn.disabled = false;
+            showToast('Huella verificada ✓ — ingresa tu contraseña');
+            $('mp-enter').closest('.field-group').classList.remove('hidden');
+            $('btn-unlock').classList.remove('hidden');
+            $('btn-biometric').classList.add('hidden');
+            $('biometric-hint').classList.add('hidden');
+            $('mp-enter').focus();
+            State._bioVerified = true;
+          } else {
+            // Solo huella — necesitamos la clave derivada
+            // Pedimos la contraseña una sola vez para obtener la clave
+            const savedPw = sessionStorage.getItem('hades_session_pw');
+            if (savedPw) {
+              const key = await Crypto.verifyPassword(savedPw);
+              if (key) {
+                State.cryptoKey = key;
+                State.entries = await Crypto.loadVault(key);
+                sessionStorage.removeItem('hades_session_pw');
+                enterApp();
+                return;
+              }
+            }
+            // Si no hay contraseña en sesión, pedir una vez
+            btn.classList.remove('scanning');
+            btn.disabled = false;
+            showToast('Huella verificada ✓ — ingresa tu contraseña una vez');
+            $('mp-enter').closest('.field-group').classList.remove('hidden');
+            $('btn-unlock').classList.remove('hidden');
+            $('btn-biometric').classList.add('hidden');
+            $('biometric-hint').classList.add('hidden');
+            $('mp-enter').focus();
+            State._bioVerified = true;
+          }
+        }
+      } catch (e) {
+        btn.classList.remove('scanning');
+        btn.disabled = false;
+        if (e.name === 'NotAllowedError') {
+          showToast('Verificación cancelada');
+        } else {
+          showToast('Error biométrico — usa tu contraseña');
+          $('mp-enter').closest('.field-group').classList.remove('hidden');
+          $('btn-unlock').classList.remove('hidden');
+        }
+      }
+    });
     on($('btn-unlock'), 'click', async () => {
       const pw = $('mp-enter').value;
       if (!pw) return;
@@ -199,8 +356,14 @@ async function initUnlockScreen() {
         $('btn-unlock').disabled = false;
         $('btn-unlock').textContent = 'Entrar';
         $('mp-enter').focus();
+        State._bioVerified = false;
         return;
       }
+      // Si modo biométrico 'biometric', guardar pw en sesión para próximos accesos
+      if (Biometric.getMode() === 'biometric') {
+        sessionStorage.setItem('hades_session_pw', pw);
+      }
+      State._bioVerified = false;
       State.cryptoKey = key;
       State.entries = await Crypto.loadVault(key);
       enterApp();
@@ -218,6 +381,7 @@ function enterApp() {
   $('page-app').classList.add('hidden');
   document.body.dataset.page = 'home';
   loadAutoLockSetting();
+  loadBiometricSetting();
   resetAutoLock();
   history.replaceState({ page: 'home' }, '', '');
   document.addEventListener('mousemove', resetAutoLock, { passive: true });
@@ -557,6 +721,14 @@ function renderGenerator() {
   return pw;
 }
 // ── SETTINGS ──────────────────────────────────────────
+function loadBiometricSetting() {
+  const mode = Biometric.getMode();
+  if ($('biometric-mode-select')) $('biometric-mode-select').value = mode;
+  const hasCredential = !!Biometric.getCredentialId();
+  const showRegister = (mode !== 'off') && !hasCredential;
+  $('biometric-register-row')?.classList.toggle('hidden', !showRegister);
+}
+
 function loadAutoLockSetting() {
   const saved = localStorage.getItem('hades_autolock');
   const val = saved !== null ? parseInt(saved) : 300;
@@ -708,6 +880,39 @@ function bindEvents() {
   });
   on($('mp-new'), 'keydown', e => { if (e.key === 'Enter') $('mp-confirm').focus(); });
   on($('mp-confirm'), 'keydown', e => { if (e.key === 'Enter') $('btn-setup')?.click(); });
+  // Biometric settings
+  on($('biometric-mode-select'), 'change', async () => {
+    const mode = $('biometric-mode-select').value;
+    const hasCredential = !!Biometric.getCredentialId();
+    if (mode !== 'off' && !hasCredential) {
+      // Necesita registrar primero
+      $('biometric-register-row').classList.remove('hidden');
+    } else {
+      $('biometric-register-row').classList.add('hidden');
+      Biometric.setMode(mode);
+      showToast(mode === 'off' ? 'Acceso biométrico desactivado' : 'Modo biométrico actualizado');
+    }
+  });
+  on($('btn-register-biometric'), 'click', async () => {
+    if (!Biometric.isSupported()) {
+      showToast('Tu dispositivo no soporta biometría');
+      return;
+    }
+    try {
+      $('btn-register-biometric').textContent = 'Registrando…';
+      $('btn-register-biometric').disabled = true;
+      await Biometric.register();
+      const mode = $('biometric-mode-select').value;
+      Biometric.setMode(mode);
+      $('biometric-register-row').classList.add('hidden');
+      showToast('¡Huella registrada exitosamente! 🔐');
+    } catch(e) {
+      showToast(e.name === 'NotAllowedError' ? 'Registro cancelado' : 'Error al registrar huella');
+    } finally {
+      $('btn-register-biometric').textContent = 'Registrar';
+      $('btn-register-biometric').disabled = false;
+    }
+  });
 }
 // ── REGISTER SERVICE WORKER ───────────────────────────
 if ('serviceWorker' in navigator) {
