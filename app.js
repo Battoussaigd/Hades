@@ -360,10 +360,12 @@ async function initUnlockScreen() {
   $('unlock-recovery').classList.add('hidden');
   $('unlock-new-password').classList.add('hidden');
 
-  // Mostrar nombre del usuario en unlock
+  // Mostrar nombre del usuario en unlock y home
   const user = Crypto.getUser();
-  if (user && $('unlock-username')) {
-    $('unlock-username').textContent = user.name || 'Usuario';
+  if (user) {
+    const name = user.name || 'Usuario';
+    if ($('unlock-username')) $('unlock-username').textContent = name;
+    if ($('home-username')) $('home-username').textContent = name;
   }
 
   if (!hasVault) {
