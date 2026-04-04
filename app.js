@@ -9,6 +9,8 @@ const Crypto = {
   SALT_KEY: 'hades_salt',
   VAULT_KEY: 'hades_vault',
   META_KEY: 'hades_meta',
+  RECOVERY_KEY: 'hades_recovery',
+  USER_KEY: 'hades_user',
   BIOMETRIC_KEY: 'hades_biometric_id',
   getSalt() {
     let salt = localStorage.getItem(this.SALT_KEY);
@@ -59,6 +61,22 @@ const Crypto = {
   },
   hasVault() {
     return !!localStorage.getItem(this.VAULT_KEY);
+  },
+  saveUser(name, email) {
+    localStorage.setItem(this.USER_KEY, JSON.stringify({ name, email }));
+  },
+  getUser() {
+    try { return JSON.parse(localStorage.getItem(this.USER_KEY)) || null; } catch { return null; }
+  },
+  saveRecovery(phrase) {
+    // Guardamos el hash de la frase para verificación
+    const hashed = btoa(phrase.join('|'));
+    localStorage.setItem(this.RECOVERY_KEY, hashed);
+  },
+  verifyRecovery(words) {
+    const stored = localStorage.getItem(this.RECOVERY_KEY);
+    if (!stored) return false;
+    return btoa(words.join('|')) === stored;
   },
   deleteVault() {
     localStorage.removeItem(this.VAULT_KEY);
@@ -210,6 +228,59 @@ const Biometric = {
     return password;
   }
 };
+// ── RECOVERY PHRASE ENGINE ───────────────────────────
+const RECOVERY_WORDS = [
+  'árbol','banco','brazo','campo','carta','cielo','clase','clave','corte','cueva',
+  'datos','deber','delta','denso','dicha','dulce','earth','enero','fábri','fácil',
+  'falda','fecha','finca','firma','flota','flujo','forma','fruta','fuego','fuerza',
+  'ganas','globo','golpe','grano','grupo','gusto','habla','había','hielo','hierba',
+  'hijos','honor','hotel','hueso','huevo','ideas','igual','imagen','inicio','joven',
+  'juego','junto','largo','leche','letra','libro','línea','llave','lluvia','local',
+  'logro','lucha','lugar','madre','manga','manos','marca','marea','media','mejor',
+  'menos','mente','mesón','metas','miedo','monte','mundo','músic','nieve','nivel',
+  'noble','noche','norma','norte','novia','nueva','nunca','obras','orden','orgen',
+  'otros','padre','papel','parce','parqu','pasos','patri','peace','perro','pesos',
+  'piedra','pista','plano','plaza','pluma','poder','pompa','preci','prima','publi',
+  'punto','queda','quien','razón','rebos','reino','reloj','resto','river','robot',
+  'rocas','ruido','rumbo','salud','salvo','sangr','sauce','selva','señal','seria',
+  'siete','siglo','signo','silba','silla','sitio','sobre','solar','solid','sombr',
+  'suelo','sueño','surco','tabla','tarea','tarde','techo','tejid','temas','tener',
+  'texto','tiempo','timón','tinta','título','todas','tomar','topes','torre','total',
+  'tramo','trato','trigo','tropa','tunel','turno','única','unión','unity','vacío',
+  'valor','vapor','verde','vibra','viaje','video','villa','viola','vista','voces',
+  'vuelo','world','yerba','zones'
+];
+
+const Recovery = {
+  generate() {
+    const words = [];
+    const arr = new Uint32Array(12);
+    crypto.getRandomValues(arr);
+    arr.forEach(n => words.push(RECOVERY_WORDS[n % RECOVERY_WORDS.length]));
+    return words;
+  },
+  renderPhrase(words, containerId) {
+    const container = $(containerId);
+    if (!container) return;
+    container.innerHTML = words.map((w, i) => `
+      <div class="recovery-word">
+        <span class="recovery-word-num">${i+1}.</span>
+        <span class="recovery-word-text">${w}</span>
+      </div>`).join('');
+  },
+  renderInputs(containerId) {
+    const container = $(containerId);
+    if (!container) return;
+    container.innerHTML = Array.from({length: 12}, (_, i) =>
+      `<input type="text" placeholder="Palabra ${i+1}" data-idx="${i}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />`
+    ).join('');
+  },
+  getInputWords(containerId) {
+    const inputs = $(containerId)?.querySelectorAll('input');
+    return Array.from(inputs || []).map(i => i.value.trim().toLowerCase());
+  }
+};
+
 // ── APP STATE ─────────────────────────────────────────
 const State = {
   cryptoKey: null,
@@ -286,29 +357,78 @@ async function initUnlockScreen() {
   const hasVault = Crypto.hasVault();
   $('unlock-first-time').classList.toggle('hidden', hasVault);
   $('unlock-existing').classList.toggle('hidden', !hasVault);
+  $('unlock-recovery').classList.add('hidden');
+  $('unlock-new-password').classList.add('hidden');
+
+  // Mostrar nombre del usuario en unlock
+  const user = Crypto.getUser();
+  if (user && $('unlock-username')) {
+    $('unlock-username').textContent = user.name || 'Usuario';
+  }
+
   if (!hasVault) {
+    // ── PASO 1: Datos personales ──
     on($('mp-new'), 'input', () => {
       const pw = $('mp-new').value;
       const s = passwordStrength(pw);
       $('strength-wrap').classList.toggle('hidden', pw.length === 0);
       updateStrengthUI('strength-fill', 'strength-label', s);
     });
-    on($('btn-setup'), 'click', async () => {
+
+    on($('btn-setup-next'), 'click', () => {
+      const name = $('reg-name').value.trim();
       const pw = $('mp-new').value.trim();
       const confirm = $('mp-confirm').value;
-      if (pw.length < 8) return showToast('Mínimo 8 caracteres');
-      if (pw !== confirm) return showToast('Las contraseñas no coinciden');
+      const err = $('setup-error-1');
+      if (!name) { err.textContent = 'Ingresa tu nombre'; err.classList.remove('hidden'); return; }
+      if (pw.length < 8) { err.textContent = 'Mínimo 8 caracteres'; err.classList.remove('hidden'); return; }
+      if (pw !== confirm) { err.textContent = 'Las contraseñas no coinciden'; err.classList.remove('hidden'); return; }
+      err.classList.add('hidden');
+      $('setup-step-1').classList.add('hidden');
+      $('setup-step-2').classList.remove('hidden');
+    });
+
+    on($('btn-setup-back'), 'click', () => {
+      $('setup-step-2').classList.add('hidden');
+      $('setup-step-1').classList.remove('hidden');
+    });
+    on($('btn-setup'), 'click', async () => {
+      const name = $('reg-name').value.trim();
+      const pw = $('mp-new').value.trim();
+      const mode = document.querySelector('input[name="access-mode"]:checked')?.value || 'password';
+      const err = $('setup-error-2');
       try {
         $('btn-setup').disabled = true;
         $('btn-setup').textContent = 'Creando…';
+        // Crear bóveda
         State.cryptoKey = await Crypto.initVault(pw);
         State.entries = [];
-        enterApp();
+        // Guardar usuario
+        Crypto.saveUser(name, '');
+        // Configurar modo biométrico
+        if (mode === 'biometric' || mode === 'both') {
+          Biometric.setMode(mode);
+          if (Biometric.isSupported()) {
+            try { await Biometric.register(pw); } catch(e) { /* continúa sin huella */ }
+          }
+        }
+        // Generar frase de recuperación
+        const phrase = Recovery.generate();
+        Crypto.saveRecovery(phrase);
+        // Mostrar frase
+        $('setup-step-2').classList.add('hidden');
+        $('setup-step-3').classList.remove('hidden');
+        Recovery.renderPhrase(phrase, 'recovery-phrase-display');
       } catch (e) {
-        showToast('Error al crear bóveda');
+        err.textContent = 'Error al crear bóveda';
+        err.classList.remove('hidden');
         $('btn-setup').disabled = false;
-        $('btn-setup').textContent = 'Crear bóveda';
+        $('btn-setup').textContent = 'Finalizar';
       }
+    });
+
+    on($('btn-setup-finish'), 'click', () => {
+      enterApp();
     });
   } else {
     // Configurar pantalla según modo biométrico
@@ -370,6 +490,25 @@ async function initUnlockScreen() {
         }
       }
     });
+    // Contador de intentos fallidos
+    let failCount = parseInt(localStorage.getItem('hades_fail_count') || '0');
+    function updateAttemptsUI() {
+      if (failCount >= 1) {
+        $('unlock-attempts-wrap').classList.remove('hidden');
+        const remaining = 3 - failCount;
+        if (remaining > 0) {
+          $('attempts-warning').textContent = `Intento fallido. Te quedan ${remaining} intento${remaining === 1 ? '' : 's'}.`;
+          $('btn-forgot').classList.add('hidden');
+        } else {
+          $('attempts-warning').textContent = '3 intentos fallidos.';
+          $('btn-forgot').classList.remove('hidden');
+        }
+      } else {
+        $('unlock-attempts-wrap').classList.add('hidden');
+      }
+    }
+    updateAttemptsUI();
+
     on($('btn-unlock'), 'click', async () => {
       const pw = $('mp-enter').value;
       if (!pw) return;
@@ -378,22 +517,69 @@ async function initUnlockScreen() {
       $('unlock-error').classList.add('hidden');
       const key = await Crypto.verifyPassword(pw);
       if (!key) {
+        failCount = Math.min(failCount + 1, 3);
+        localStorage.setItem('hades_fail_count', failCount);
         $('unlock-error').classList.remove('hidden');
         $('btn-unlock').disabled = false;
         $('btn-unlock').textContent = 'Entrar';
         $('mp-enter').focus();
         State._bioVerified = false;
+        updateAttemptsUI();
         return;
       }
+      localStorage.setItem('hades_fail_count', '0');
       State._bioVerified = false;
       State.cryptoKey = key;
       State.entries = await Crypto.loadVault(key);
       enterApp();
     });
     on($('mp-enter'), 'keydown', e => { if (e.key === 'Enter') $('btn-unlock').click(); });
-    on($('btn-reset-vault'), 'click', async () => {
-      const ok = await showConfirm('Eliminar bóveda', 'Esto elimina TODOS tus datos permanentemente. Esta acción no se puede deshacer.');
-      if (ok) { Crypto.deleteVault(); location.reload(); }
+
+    // Recuperación por frase de 12 palabras
+    on($('btn-forgot'), 'click', () => {
+      $('unlock-existing').classList.add('hidden');
+      $('unlock-recovery').classList.remove('hidden');
+      Recovery.renderInputs('recovery-input-grid');
+    });
+    on($('btn-recovery-back'), 'click', () => {
+      $('unlock-recovery').classList.add('hidden');
+      $('unlock-existing').classList.remove('hidden');
+    });
+    on($('btn-recovery-verify'), 'click', () => {
+      const words = Recovery.getInputWords('recovery-input-grid');
+      if (words.some(w => !w)) { showToast('Completa todas las palabras'); return; }
+      if (!Crypto.verifyRecovery(words)) {
+        $('recovery-error').classList.remove('hidden');
+        return;
+      }
+      $('recovery-error').classList.add('hidden');
+      $('unlock-recovery').classList.add('hidden');
+      $('unlock-new-password').classList.remove('hidden');
+    });
+    on($('btn-recovery-save'), 'click', async () => {
+      const newPw = $('recovery-pw-new').value.trim();
+      const confirm = $('recovery-pw-confirm').value;
+      const err = $('recovery-pw-error');
+      if (newPw.length < 8) { err.textContent = 'Mínimo 8 caracteres'; err.classList.remove('hidden'); return; }
+      if (newPw !== confirm) { err.textContent = 'Las contraseñas no coinciden'; err.classList.remove('hidden'); return; }
+      err.classList.add('hidden');
+      const ok = await showConfirm(
+        'Restablecer contraseña',
+        'La bóveda se reiniciará vacía al cambiar la contraseña. ¿Continuar?'
+      );
+      if (!ok) return;
+      try {
+        Crypto.deleteVault();
+        State.cryptoKey = await Crypto.initVault(newPw);
+        State.entries = [];
+        localStorage.setItem('hades_fail_count', '0');
+        const phrase = Recovery.generate();
+        Crypto.saveRecovery(phrase);
+        showToast('Contraseña restablecida');
+        enterApp();
+      } catch(e) {
+        err.textContent = 'Error al guardar'; err.classList.remove('hidden');
+      }
     });
   }
 }

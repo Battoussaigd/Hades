@@ -775,3 +775,106 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 2; stroke-
   color: var(--text3);
   margin-top: 6px;
 }
+
+/* ═══════════════════════════════════════════
+   REGISTRO EN 2 PASOS
+   ═══════════════════════════════════════════ */
+.setup-step { display: flex; flex-direction: column; gap: 14px; }
+.setup-step.hidden { display: none; }
+
+.setup-step-header { margin-bottom: 4px; }
+.setup-step-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 11px; font-weight: 600; letter-spacing: .04em;
+  background: rgba(124,108,248,.15); color: var(--accent);
+  margin-bottom: 8px;
+}
+.setup-step-btns {
+  display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px;
+}
+
+/* Opciones de modo de acceso */
+.access-mode-options { display: flex; flex-direction: column; gap: 10px; }
+.access-mode-option { cursor: pointer; }
+.access-mode-option input[type="radio"] { display: none; }
+.access-mode-card {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1.5px solid var(--glass-border);
+  background: var(--glass-bg);
+  transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+}
+.access-mode-card svg {
+  width: 22px; height: 22px; stroke: var(--text3); flex-shrink: 0;
+  transition: stroke var(--transition);
+}
+.access-mode-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.access-mode-sub   { font-size: 12px; color: var(--text3); margin-top: 2px; }
+.access-mode-option input:checked + .access-mode-card {
+  border-color: var(--accent);
+  background: rgba(124,108,248,.08);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.access-mode-option input:checked + .access-mode-card svg { stroke: var(--accent); }
+
+/* Frase de recuperación */
+.recovery-phrase-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  background: var(--input-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+}
+.recovery-word {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px;
+}
+.recovery-word-num {
+  font-size: 10px; color: var(--text3);
+  min-width: 16px; text-align: right;
+}
+.recovery-word-text {
+  font-weight: 600; color: var(--accent);
+  font-family: var(--font-display);
+}
+.recovery-warning {
+  font-size: 12px; color: var(--danger);
+  text-align: center; line-height: 1.5;
+}
+
+/* Grid de inputs para recuperación */
+.recovery-input-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.recovery-input-grid input {
+  width: 100%;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 13px; color: var(--text);
+  outline: none; text-align: center;
+  transition: border-color var(--transition);
+}
+.recovery-input-grid input:focus { border-color: rgba(124,108,248,.55); }
+.recovery-input-grid input::placeholder { font-size: 11px; color: var(--text3); }
+
+/* Intentos fallidos */
+.unlock-attempts-wrap { text-align: center; }
+.attempts-warning { font-size: 13px; color: var(--danger); margin-bottom: 4px; }
+#btn-forgot {
+  font-size: 13px; color: var(--accent);
+  text-decoration: underline; padding: 4px 8px;
+}
+#btn-forgot:hover { color: var(--text); }
+
+/* Nombre en unlock */
+#unlock-username { color: var(--accent); }
