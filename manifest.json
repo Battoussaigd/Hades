@@ -1,33 +1,21 @@
 {
-  "name": "Hades 2.1",
+  "name": "Hades V2",
   "short_name": "Hades",
-  "description": "Gestor de contraseñas seguro con cifrado AES-256 local",
+  "description": "Gestor de contraseñas cifrado local — sin servidores, sin telemetría",
   "start_url": "/",
   "display": "standalone",
   "orientation": "any",
-  "theme_color": "#0a0a0f",
-  "background_color": "#0a0a0f",
+  "theme_color": "#0d0d14",
+  "background_color": "#0d0d14",
   "categories": ["productivity", "utilities"],
   "icons": [
-    {
-      "src": "icons/icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "icons/icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any maskable"
-    }
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ],
   "screenshots": [],
   "shortcuts": [
-    {
-      "name": "Abrir Bóveda",
-      "url": "/",
-      "description": "Acceder a la bóveda de contraseñas"
-    }
+    { "name": "Abrir Bóveda", "url": "/", "description": "Acceder a la bóveda de contraseñas" }
   ]
 }

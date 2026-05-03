@@ -3,39 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="theme-color" content="#0a0a0f" media="(prefers-color-scheme: dark)" />
-  <meta name="theme-color" content="#f0f2f7" media="(prefers-color-scheme: light)" />
-  <meta name="description" content="Hades 2.1 — Gestor de contraseñas seguro con cifrado local" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Hades" />
-  <title>Hades 2.1</title>
+  <meta name="theme-color" content="#0d0d14" />
+  <meta name="description" content="Hades V2 — Gestor de contraseñas cifrado local" />
+  <title>Hades V2</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
-  <!--
-    CONTENT SECURITY POLICY — HADES 2.1
-    ══════════════════════════════════════════════════════════════
-    NOTA: Esta CSP via <meta> es una medida de defensa en profundidad.
-    LIMITACIÓN IMPORTANTE: El meta tag CSP no puede bloquear:
-      - Navegación (form-action, frame-ancestors)
-      - report-uri
-      - Cabeceras de respuesta (X-Frame-Options, etc.)
-    Para protección completa se recomienda configurar el header HTTP
-    Content-Security-Policy en Netlify (_headers file).
-    ══════════════════════════════════════════════════════════════
-    Política:
-      default-src 'none'            → bloquear todo por defecto
-      script-src 'self'             → solo app.js local, sin inline, sin eval
-      style-src 'self' fonts.googleapis.com → CSS local + Google Fonts CSS
-      font-src fonts.gstatic.com    → solo archivos de fuente de Google
-      img-src 'self' data:          → iconos locales + data URIs para PWA
-      connect-src 'none'            → sin conexiones de red desde JS
-      object-src 'none'             → bloquear plugins (Flash, etc.)
-      frame-src 'none'              → sin iframes
-      base-uri 'self'               → evitar base tag injection
-      form-action 'none'            → sin envío de formularios externos
-    ══════════════════════════════════════════════════════════════
-  -->
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'none';
     script-src 'self';
@@ -44,6 +20,7 @@
     img-src 'self' data:;
     connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com;
     manifest-src 'self';
+    worker-src 'self';
     object-src 'none';
     frame-src 'none';
     base-uri 'self';
@@ -51,256 +28,209 @@
   " />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body class="theme-dark" data-page="unlock">
 
-  <!-- ═══════════════ SPLASH / UNLOCK ═══════════════ -->
-  <div id="page-unlock" class="page active">
-    <div class="unlock-bg">
-      <div class="orb orb-1"></div>
-      <div class="orb orb-2"></div>
-      <div class="orb orb-3"></div>
-    </div>
-    <div class="unlock-center">
-      <div class="brand-mark">
-        <img src="icons/icon-192.png" alt="Hades" />
-      </div>
-      <p class="brand-sub">Gestor de contraseñas cifrado</p>
-
-      <div id="unlock-form-wrapper" class="glass-card unlock-card">
-
-        <!-- ── PASO 1: Datos personales ── -->
-        <div id="unlock-first-time" class="hidden">
-          <div class="setup-step" id="setup-step-1">
-            <div class="setup-step-header">
-              <div class="setup-step-badge">1 de 2</div>
-              <h2>Crear cuenta</h2>
-              <p class="form-hint">Tus datos se guardan solo en este dispositivo.</p>
-            </div>
-            <div class="field-group">
-              <label>Nombre</label>
-              <div class="glass-input-wrap">
-                <input type="text" id="reg-name" placeholder="Tu nombre" autocomplete="name" />
-              </div>
-            </div>
-            <div class="field-group">
-              <label>Contraseña maestra</label>
-              <div class="glass-input-wrap">
-                <input type="password" id="mp-new" placeholder="Mínimo 8 caracteres" autocomplete="new-password" />
-                <button class="eye-btn" data-target="mp-new">
-                  <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                </button>
-              </div>
-            </div>
-            <div class="field-group">
-              <label>Confirmar contraseña</label>
-              <div class="glass-input-wrap">
-                <input type="password" id="mp-confirm" placeholder="Repite la contraseña" autocomplete="new-password" />
-                <button class="eye-btn" data-target="mp-confirm">
-                  <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                </button>
-              </div>
-            </div>
-            <div class="strength-bar-wrap hidden" id="strength-wrap">
-              <div class="strength-bar"><div id="strength-fill"></div></div>
-              <span id="strength-label"></span>
-            </div>
-            <p id="setup-error-1" class="error-msg hidden"></p>
-            <button class="btn-primary full-width" id="btn-setup-next">
-              Siguiente
-              <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-            </button>
-          </div>
-
-          <!-- ── PASO 2: Modo de acceso ── -->
-          <div class="setup-step hidden" id="setup-step-2">
-            <div class="setup-step-header">
-              <div class="setup-step-badge">2 de 2</div>
-              <h2>Modo de acceso</h2>
-              <p class="form-hint">¿Cómo quieres ingresar a Hades?</p>
-            </div>
-            <div class="access-mode-options">
-              <label class="access-mode-option">
-                <input type="radio" name="access-mode" value="password" checked />
-                <div class="access-mode-card">
-                  <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                  <div>
-                    <div class="access-mode-title">Solo contraseña</div>
-                    <div class="access-mode-sub">Acceso tradicional</div>
-                  </div>
-                </div>
-              </label>
-              <label class="access-mode-option">
-                <input type="radio" name="access-mode" value="biometric" />
-                <div class="access-mode-card">
-                  <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 0 1 10 10"/><path d="M12 6a6 6 0 0 1 6 6"/><path d="M12 10a2 2 0 0 1 2 2"/><path d="M2 12a10 10 0 0 0 10 10"/><path d="M6 12a6 6 0 0 0 6 6"/><path d="M10 12a2 2 0 0 0 2 2"/></svg>
-                  <div>
-                    <div class="access-mode-title">Solo huella</div>
-                    <div class="access-mode-sub">Más rápido y cómodo</div>
-                  </div>
-                </div>
-              </label>
-              <label class="access-mode-option">
-                <input type="radio" name="access-mode" value="both" />
-                <div class="access-mode-card">
-                  <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                  <div>
-                    <div class="access-mode-title">Huella + Contraseña</div>
-                    <div class="access-mode-sub">Máxima seguridad</div>
-                  </div>
-                </div>
-              </label>
-            </div>
-            <p id="setup-error-2" class="error-msg hidden"></p>
-            <div class="setup-step-btns">
-              <button class="btn-ghost" id="btn-setup-back">← Volver</button>
-              <button class="btn-primary" id="btn-setup">Finalizar</button>
-            </div>
-          </div>
-
-          <!-- ── PASO 3: Frase de recuperación ── -->
-          <div class="setup-step hidden" id="setup-step-3">
-            <div class="setup-step-header">
-              <div class="setup-step-badge" style="background:rgba(52,211,153,.15);color:#34d399">¡Listo!</div>
-              <h2>Guarda tu frase</h2>
-              <p class="form-hint">Estas 12 palabras son tu llave maestra. Si olvidas tu contraseña, las necesitarás para recuperar el acceso. <strong>Anótalas en papel.</strong></p>
-            </div>
-            <div class="recovery-phrase-grid" id="recovery-phrase-display"></div>
-            <p class="recovery-warning">⚠️ Guárdalas en un lugar seguro. No podrás verlas de nuevo.</p>
-            <button class="btn-primary full-width" id="btn-setup-finish">Entendido, he guardado mi frase</button>
-          </div>
-        </div>
-
-        <!-- ── UNLOCK EXISTENTE ── -->
-        <div id="unlock-existing" class="hidden">
-          <h2>Bienvenido, <span id="unlock-username">Usuario</span></h2>
-          <p class="form-hint">Ingresa tu contraseña maestra para acceder.</p>
-          <div class="field-group">
-            <label>Contraseña maestra</label>
-            <div class="glass-input-wrap">
-              <input type="password" id="mp-enter" placeholder="••••••••" autocomplete="current-password" />
-              <button class="eye-btn" data-target="mp-enter">
-                <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-              </button>
-            </div>
-          </div>
-          <p id="unlock-error" class="error-msg hidden">Contraseña incorrecta</p>
-          <div class="unlock-attempts-wrap hidden" id="unlock-attempts-wrap">
-            <p class="attempts-warning" id="attempts-warning"></p>
-            <button class="btn-ghost" id="btn-forgot">¿Olvidaste tu contraseña?</button>
-          </div>
-          <button class="btn-primary full-width" id="btn-unlock">Entrar</button>
-          <button class="btn-biometric hidden" id="btn-biometric">
-            <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 0 1 10 10"/><path d="M12 6a6 6 0 0 1 6 6"/><path d="M12 10a2 2 0 0 1 2 2"/><path d="M2 12a10 10 0 0 0 10 10"/><path d="M6 12a6 6 0 0 0 6 6"/><path d="M10 12a2 2 0 0 0 2 2"/></svg>
-            Usar huella dactilar
-          </button>
-          <p class="biometric-hint hidden" id="biometric-hint">o ingresa tu contraseña maestra</p>
-        </div>
-
-        <!-- ── RECUPERACIÓN POR FRASE ── -->
-        <div id="unlock-recovery" class="hidden">
-          <h2>Recuperar acceso</h2>
-          <p class="form-hint">Ingresa las 12 palabras de tu frase de recuperación en orden.</p>
-          <div class="recovery-input-grid" id="recovery-input-grid"></div>
-          <p id="recovery-error" class="error-msg hidden">Frase incorrecta. Verifica las palabras.</p>
-          <div class="setup-step-btns">
-            <button class="btn-ghost" id="btn-recovery-back">← Volver</button>
-            <button class="btn-primary" id="btn-recovery-verify">Verificar</button>
-          </div>
-        </div>
-
-        <!-- ── NUEVA CONTRASEÑA TRAS RECUPERACIÓN ── -->
-        <div id="unlock-new-password" class="hidden">
-          <h2>Nueva contraseña</h2>
-          <p class="form-hint">Crea una nueva contraseña maestra para tu bóveda.</p>
-          <div class="field-group">
-            <label>Nueva contraseña</label>
-            <div class="glass-input-wrap">
-              <input type="password" id="recovery-pw-new" placeholder="Mínimo 8 caracteres" />
-              <button class="eye-btn" data-target="recovery-pw-new">
-                <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-              </button>
-            </div>
-          </div>
-          <div class="field-group">
-            <label>Confirmar contraseña</label>
-            <div class="glass-input-wrap">
-              <input type="password" id="recovery-pw-confirm" placeholder="Repite la contraseña" />
-              <button class="eye-btn" data-target="recovery-pw-confirm">
-                <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-              </button>
-            </div>
-          </div>
-          <p id="recovery-pw-error" class="error-msg hidden"></p>
-          <button class="btn-primary full-width" id="btn-recovery-save">Guardar contraseña</button>
-        </div>
-
-      </div>
-
-      <div class="unlock-footer">
-        <button class="theme-toggle-small" id="theme-toggle-unlock" title="Cambiar tema">
-          <svg id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-          <svg id="icon-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-        </button>
-      </div>
-    </div>
+  <!-- ═══════════════ PARALLAX BACKGROUND ═══════════════ -->
+  <div class="parallax-bg" id="parallax-bg">
+    <div class="orb orb-1" data-parallax="30"></div>
+    <div class="orb orb-2" data-parallax="20"></div>
+    <div class="orb orb-3" data-parallax="15"></div>
+    <div class="orb orb-4" data-parallax="25"></div>
+    <div class="grid-overlay"></div>
   </div>
 
-  <!-- ═══════════════ HOME MENU ═══════════════ -->
-  <div id="page-home" class="page hidden">
-    <div class="unlock-bg">
-      <div class="orb orb-1"></div>
-      <div class="orb orb-2"></div>
-      <div class="orb orb-3"></div>
-    </div>
-    <div class="home-header">
-      <button class="theme-toggle-small" id="theme-toggle-home" title="Cambiar tema">
-        <svg id="icon-sun-home" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-        <svg id="icon-moon-home" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-      </button>
-      <button class="icon-btn home-lock-btn" id="btn-lock-home" title="Bloquear">
-        <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
-      </button>
-    </div>
-    <div class="home-center">
-      <div class="home-brand">
-        <h1 class="home-title">HADES</h1>
-        <p class="home-welcome">Bienvenido, <span id="home-username">Usuario</span></p>
+  <!-- ═══════════════ UNLOCK / SETUP PAGE ═══════════════ -->
+  <div id="page-unlock" class="page active">
+    <div class="unlock-center">
+
+      <!-- LOADING -->
+      <div id="state-loading" class="glass-card unlock-card">
+        <div class="loading-spinner"></div>
+        <p class="loading-text">Iniciando bóveda…</p>
       </div>
-      <div class="home-menu">
-        <button class="home-card" id="home-btn-vault">
-          <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-          <span>Bóveda</span>
-        </button>
-        <button class="home-card" id="home-btn-generator">
-          <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          <span>Generador</span>
-        </button>
-        <button class="home-card" id="home-btn-settings">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          <span>Ajustes</span>
-        </button>
-        <button class="home-card" id="home-btn-help">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-          <span>Ayuda</span>
+
+      <!-- SETUP: PASO 1 — Datos -->
+      <div id="state-setup-1" class="glass-card unlock-card hidden tilt-card">
+        <div class="card-glow"></div>
+        <div class="unlock-brand">
+          <img src="icons/icon-192.png" alt="Hades" class="brand-icon" />
+          <h1 class="brand-name">HADES <span>V2</span></h1>
+          <p class="brand-sub">Crea tu bóveda segura</p>
+        </div>
+        <div class="step-badge">Paso 1 de 3</div>
+        <div class="field-group">
+          <label>Tu nombre</label>
+          <div class="glass-input-wrap">
+            <input type="text" id="reg-name" placeholder="¿Cómo te llamas?" autocomplete="name" />
+          </div>
+        </div>
+        <div class="field-group">
+          <label>Contraseña maestra</label>
+          <div class="glass-input-wrap">
+            <input type="password" id="reg-password" placeholder="Mínimo 10 caracteres" autocomplete="new-password" />
+            <button class="eye-btn" data-target="reg-password" type="button">
+              <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+          <div class="strength-wrap hidden" id="reg-strength-wrap">
+            <div class="strength-bar"><div id="reg-strength-fill"></div></div>
+            <span id="reg-strength-label"></span>
+          </div>
+        </div>
+        <div class="field-group">
+          <label>Confirmar contraseña</label>
+          <div class="glass-input-wrap">
+            <input type="password" id="reg-confirm" placeholder="Repite la contraseña" autocomplete="new-password" />
+            <button class="eye-btn" data-target="reg-confirm" type="button">
+              <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </div>
+        <p id="setup-err-1" class="error-msg hidden"></p>
+        <button class="btn-primary full-width" id="btn-setup-next-1">
+          Siguiente
+          <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
         </button>
       </div>
 
+      <!-- SETUP: PASO 2 — Modo de acceso -->
+      <div id="state-setup-2" class="glass-card unlock-card hidden tilt-card">
+        <div class="card-glow"></div>
+        <div class="step-badge">Paso 2 de 3</div>
+        <h2 class="card-title">Modo de acceso</h2>
+        <p class="card-sub">¿Cómo quieres ingresar a Hades?</p>
+        <div class="access-options">
+          <label class="access-option">
+            <input type="radio" name="access-mode" value="password" checked />
+            <div class="access-card">
+              <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              <div>
+                <div class="access-title">Solo contraseña</div>
+                <div class="access-sub">Acceso tradicional y seguro</div>
+              </div>
+            </div>
+          </label>
+          <label class="access-option">
+            <input type="radio" name="access-mode" value="both" />
+            <div class="access-card">
+              <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 0 1 10 10"/><path d="M12 6a6 6 0 0 1 6 6"/><path d="M12 10a2 2 0 0 1 2 2"/><path d="M2 12a10 10 0 0 0 10 10"/><path d="M6 12a6 6 0 0 0 6 6"/><path d="M10 12a2 2 0 0 0 2 2"/></svg>
+              <div>
+                <div class="access-title">Contraseña + Huella</div>
+                <div class="access-sub">Más cómodo, siempre con fallback</div>
+              </div>
+            </div>
+          </label>
+        </div>
+        <p class="hint-text">La huella es opcional y siempre podrás usar tu contraseña como alternativa.</p>
+        <p id="setup-err-2" class="error-msg hidden"></p>
+        <div class="btn-row">
+          <button class="btn-ghost" id="btn-setup-back-2">← Volver</button>
+          <button class="btn-primary" id="btn-setup-next-2">Siguiente →</button>
+        </div>
+      </div>
+
+      <!-- SETUP: PASO 3 — Frase de recuperación -->
+      <div id="state-setup-3" class="glass-card unlock-card wide hidden tilt-card">
+        <div class="card-glow card-glow-green"></div>
+        <div class="step-badge step-badge-green">¡Casi listo!</div>
+        <h2 class="card-title">Guarda tu frase de recuperación</h2>
+        <p class="card-sub">Estas 12 palabras son tu única forma de recuperar acceso si olvidas tu contraseña. <strong>No se guardan en el dispositivo.</strong></p>
+        <div class="phrase-grid" id="phrase-display"></div>
+        <div class="phrase-warning">
+          <svg viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          Anótalas en papel. No podrás verlas de nuevo.
+        </div>
+        <button class="btn-primary full-width" id="btn-setup-finish">Entendido, las guardé</button>
+      </div>
+
+      <!-- LOGIN EXISTENTE -->
+      <div id="state-login" class="glass-card unlock-card hidden tilt-card">
+        <div class="card-glow"></div>
+        <div class="unlock-brand">
+          <img src="icons/icon-192.png" alt="Hades" class="brand-icon" />
+          <h1 class="brand-name">HADES <span>V2</span></h1>
+          <p class="brand-sub">Bienvenido, <span id="login-username">Usuario</span></p>
+        </div>
+        <div class="field-group">
+          <label>Contraseña maestra</label>
+          <div class="glass-input-wrap">
+            <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" />
+            <button class="eye-btn" data-target="login-password" type="button">
+              <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </div>
+        <p id="login-error" class="error-msg hidden"></p>
+        <div id="login-attempts-wrap" class="attempts-wrap hidden">
+          <p id="login-attempts-msg" class="attempts-msg"></p>
+          <button class="btn-link" id="btn-forgot">¿Olvidaste tu contraseña?</button>
+        </div>
+        <button class="btn-primary full-width" id="btn-login">Entrar</button>
+        <button class="btn-biometric hidden" id="btn-biometric-login">
+          <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 0 1 10 10"/><path d="M12 6a6 6 0 0 1 6 6"/><path d="M12 10a2 2 0 0 1 2 2"/><path d="M2 12a10 10 0 0 0 10 10"/><path d="M6 12a6 6 0 0 0 6 6"/><path d="M10 12a2 2 0 0 0 2 2"/></svg>
+          Usar huella dactilar
+        </button>
+      </div>
+
+      <!-- RECOVERY: Ingreso de frase -->
+      <div id="state-recovery" class="glass-card unlock-card wide hidden tilt-card">
+        <div class="card-glow card-glow-amber"></div>
+        <h2 class="card-title">Recuperar acceso</h2>
+        <p class="card-sub">Ingresa tus 12 palabras de recuperación en orden.</p>
+        <div class="recovery-input-grid" id="recovery-input-grid"></div>
+        <p id="recovery-error" class="error-msg hidden"></p>
+        <div class="btn-row">
+          <button class="btn-ghost" id="btn-recovery-back">← Volver</button>
+          <button class="btn-primary" id="btn-recovery-verify">Verificar</button>
+        </div>
+      </div>
+
+      <!-- RECOVERY: Nueva contraseña -->
+      <div id="state-new-password" class="glass-card unlock-card hidden tilt-card">
+        <div class="card-glow card-glow-green"></div>
+        <h2 class="card-title">Nueva contraseña maestra</h2>
+        <p class="card-sub">Frase correcta. Crea una nueva contraseña para tu bóveda.</p>
+        <div class="field-group">
+          <label>Nueva contraseña</label>
+          <div class="glass-input-wrap">
+            <input type="password" id="new-pw-input" placeholder="Mínimo 10 caracteres" autocomplete="new-password" />
+            <button class="eye-btn" data-target="new-pw-input" type="button">
+              <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="field-group">
+          <label>Confirmar contraseña</label>
+          <div class="glass-input-wrap">
+            <input type="password" id="new-pw-confirm" placeholder="Repite la contraseña" autocomplete="new-password" />
+          </div>
+        </div>
+        <p id="new-pw-error" class="error-msg hidden"></p>
+        <button class="btn-primary full-width" id="btn-new-pw-save">Guardar contraseña</button>
+      </div>
+
     </div>
+
+    <!-- Theme toggle -->
+    <button class="theme-toggle" id="theme-toggle-unlock" title="Cambiar tema">
+      <svg id="icon-sun-unlock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      <svg id="icon-moon-unlock" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
   </div>
 
   <!-- ═══════════════ MAIN APP ═══════════════ -->
   <div id="page-app" class="page hidden">
     <aside id="sidebar" class="sidebar">
       <div class="sidebar-brand">
-        <img class="sidebar-logo" src="icons/icon-192.png" alt="Hades" />
-        <span>Hades <strong>2.1</strong></span>
+        <img src="icons/icon-192.png" alt="Hades" class="sidebar-logo" />
+        <span>Hades <strong>V2</strong></span>
       </div>
       <nav class="sidebar-nav">
         <button class="nav-item active" data-view="vault">
-          <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
           <span>Bóveda</span>
         </button>
         <button class="nav-item" data-view="generator">
@@ -315,14 +245,10 @@
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           <span>Ayuda</span>
         </button>
-        <button class="nav-item" data-view="about">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          <span>Acerca de</span>
-        </button>
       </nav>
       <div class="sidebar-bottom">
-        <button class="nav-item" id="btn-lock">
-          <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+        <button class="nav-item nav-lock" id="btn-lock">
+          <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
           <span>Bloquear</span>
         </button>
       </div>
@@ -336,25 +262,25 @@
         <div class="topbar-title" id="view-title">Bóveda</div>
         <div class="topbar-actions">
           <button class="theme-toggle-small" id="theme-toggle-app" title="Cambiar tema">
-            <svg id="icon-sun2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-            <svg id="icon-moon2" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+            <svg id="icon-sun-app" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            <svg id="icon-moon-app" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
           </button>
         </div>
       </header>
 
-      <!-- ── VAULT ── -->
+      <!-- VAULT VIEW -->
       <div id="view-vault" class="view active">
         <div class="view-header">
-          <div class="glass-input-wrap search-bar">
+          <div class="glass-input-wrap search-wrap">
             <svg viewBox="0 0 24 24" class="search-icon"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input type="text" id="search-input" placeholder="Buscar proyectos..." />
+            <input type="text" id="search-input" placeholder="Buscar…" />
           </div>
           <button class="btn-primary" id="btn-add-entry">
             <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             Agregar
           </button>
         </div>
-        <div id="category-tabs" class="category-tabs">
+        <div class="category-tabs" id="category-tabs">
           <button class="tab active" data-cat="all">Todos</button>
           <button class="tab" data-cat="login">Logins</button>
           <button class="tab" data-cat="card">Tarjetas</button>
@@ -363,24 +289,23 @@
         </div>
         <div id="entries-grid" class="entries-grid"></div>
         <div id="empty-state" class="empty-state hidden">
-          <div class="empty-icon">
-            <svg viewBox="0 0 64 64"><path d="M32 6C18.7 6 8 16.7 8 30v6h6v-6C14 20 22 12 32 12s18 8 18 18v6h6v-6C56 16.7 45.3 6 32 6Z" fill="currentColor" opacity=".3"/><rect x="6" y="36" width="52" height="24" rx="8" fill="currentColor" opacity=".2"/></svg>
-          </div>
+          <svg viewBox="0 0 64 64"><path d="M32 6C18.7 6 8 16.7 8 30v6h6v-6C14 20 22 12 32 12s18 8 18 18v6h6v-6C56 16.7 45.3 6 32 6Z" fill="currentColor" opacity=".3"/><rect x="6" y="36" width="52" height="24" rx="8" fill="currentColor" opacity=".2"/></svg>
           <h3>Bóveda vacía</h3>
           <p>Agrega tu primera entrada para comenzar</p>
           <button class="btn-primary" id="btn-add-first">Agregar entrada</button>
         </div>
       </div>
 
-      <!-- ── GENERATOR ── -->
-      <div id="view-generator" class="view hidden">
+      <!-- GENERATOR VIEW -->
+      <div id="view-generator" class="view">
         <div class="gen-container">
-          <div class="glass-card gen-card">
+          <div class="glass-card gen-card tilt-card">
+            <div class="card-glow"></div>
             <h2>Generador de contraseñas</h2>
             <div class="gen-output-wrap">
-              <div class="gen-output" id="gen-output">haz clic en generar</div>
+              <div class="gen-output" id="gen-output">Haz clic en generar</div>
               <button class="icon-btn" id="btn-copy-gen" title="Copiar">
-                <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               </button>
             </div>
             <div class="gen-controls">
@@ -394,7 +319,7 @@
                 <label class="glass-checkbox"><input type="checkbox" id="use-numbers" checked /><span class="checkmark"></span>Números (0–9)</label>
                 <label class="glass-checkbox"><input type="checkbox" id="use-symbols" checked /><span class="checkmark"></span>Símbolos (!@#$)</label>
               </div>
-              <div class="strength-bar-wrap">
+              <div class="strength-wrap">
                 <div class="strength-bar"><div id="gen-strength-fill"></div></div>
                 <span id="gen-strength-label">—</span>
               </div>
@@ -404,20 +329,16 @@
         </div>
       </div>
 
-      <!-- ── SETTINGS ── -->
-      <div id="view-settings" class="view hidden">
+      <!-- SETTINGS VIEW -->
+      <div id="view-settings" class="view">
         <div class="settings-container">
           <div class="glass-card settings-card">
             <h2>Apariencia</h2>
             <div class="setting-row">
-              <div><div class="setting-label">Tema</div><div class="setting-sub">Elige entre claro y oscuro</div></div>
+              <div><div class="setting-label">Tema</div><div class="setting-sub">Claro u oscuro</div></div>
               <div class="theme-switcher">
-                <button class="theme-btn" id="theme-light-btn">
-                  <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>Claro
-                </button>
-                <button class="theme-btn" id="theme-dark-btn">
-                  <svg viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>Oscuro
-                </button>
+                <button class="theme-btn" id="theme-light-btn">☀ Claro</button>
+                <button class="theme-btn active" id="theme-dark-btn">☾ Oscuro</button>
               </div>
             </div>
           </div>
@@ -425,7 +346,7 @@
             <h2>Seguridad</h2>
             <div class="setting-row">
               <div><div class="setting-label">Auto-bloqueo</div><div class="setting-sub">Bloquear tras inactividad</div></div>
-              <select class="glass-select" id="auto-lock-select">
+              <select class="glass-select" id="autolock-select">
                 <option value="0">Desactivado</option>
                 <option value="60">1 minuto</option>
                 <option value="300" selected>5 minutos</option>
@@ -434,38 +355,31 @@
               </select>
             </div>
             <div class="setting-row">
-              <div><div class="setting-label">Cambiar contraseña maestra</div><div class="setting-sub">Requiere la contraseña actual</div></div>
+              <div><div class="setting-label">Cambiar contraseña maestra</div><div class="setting-sub">Requiere reautenticación</div></div>
               <button class="btn-secondary" id="btn-change-master">Cambiar</button>
             </div>
             <div class="setting-row">
               <div>
                 <div class="setting-label">Acceso biométrico</div>
-                <div class="setting-sub">Desbloquear con huella dactilar</div>
+                <div class="setting-sub">Huella dactilar (WebAuthn)</div>
               </div>
-              <select class="glass-select" id="biometric-mode-select">
-                <option value="off">Desactivado</option>
-                <option value="biometric">Solo huella</option>
-                <option value="both">Contraseña + Huella</option>
-              </select>
-            </div>
-            <div class="setting-row hidden" id="biometric-register-row">
-              <div>
-                <div class="setting-label">Registrar huella</div>
-                <div class="setting-sub">Configura tu huella para esta app</div>
+              <div class="bio-controls">
+                <span id="bio-status-label" class="bio-status">No configurado</span>
+                <button class="btn-secondary" id="btn-bio-register">Configurar</button>
+                <button class="btn-danger-ghost hidden" id="btn-bio-remove">Eliminar</button>
               </div>
-              <button class="btn-secondary" id="btn-register-biometric">Registrar</button>
             </div>
           </div>
           <div class="glass-card settings-card">
             <h2>Datos</h2>
             <div class="setting-row">
-              <div><div class="setting-label">Exportar bóveda</div><div class="setting-sub">Descarga un backup cifrado JSON</div></div>
+              <div><div class="setting-label">Exportar bóveda</div><div class="setting-sub">Backup cifrado .hades</div></div>
               <button class="btn-secondary" id="btn-export">Exportar</button>
             </div>
             <div class="setting-row">
-              <div><div class="setting-label">Importar bóveda</div><div class="setting-sub">Carga un backup cifrado JSON</div></div>
+              <div><div class="setting-label">Importar bóveda</div><div class="setting-sub">Restaurar desde backup</div></div>
               <button class="btn-secondary" id="btn-import">Importar</button>
-              <input type="file" id="import-file" accept=".json" class="hidden" />
+              <input type="file" id="import-file" accept=".hades,.json" class="hidden" />
             </div>
           </div>
           <div class="glass-card settings-card danger-card">
@@ -478,201 +392,40 @@
         </div>
       </div>
 
-      <!-- ── HELP ── -->
-      <div id="view-help" class="view hidden">
-        <div class="info-container">
-
-          <div class="glass-card info-hero-card">
-            <div class="info-hero-icon">
-              <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            </div>
-            <div>
-              <h2 class="info-hero-title">Seguridad auditada y robusta</h2>
-              <p class="info-hero-sub">Hades implementa criptografía de nivel profesional con arquitectura KEK/DEK, autenticación en dos factores, frase de recuperación y protección contra ataques XSS — todo en tu dispositivo, sin servidores.</p>
-            </div>
+      <!-- HELP VIEW -->
+      <div id="view-help" class="view">
+        <div class="help-container">
+          <div class="glass-card help-card">
+            <h2>🔐 Seguridad real, sin promesas vacías</h2>
+            <p>Hades V2 usa criptografía estándar de la industria, pero es una PWA local. Eso tiene ventajas y límites que debes conocer.</p>
           </div>
-
-          <div class="glass-card settings-card">
-            <h2>🔐 Arquitectura de seguridad</h2>
-            <div class="help-block">
-              <div class="help-item">
-                <div class="help-item-title">Cifrado AES-256-GCM con separación de claves (KEK/DEK)</div>
-                <div class="help-item-desc">Hades usa dos capas de claves: una KEK (Key Encryption Key) derivada de tu contraseña maestra que protege a una DEK (Data Encryption Key) aleatoria, la cual cifra tus datos. Esto permite rotar la contraseña sin re-cifrar todo el vault y protege mejor tus datos ante acceso físico al dispositivo.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">PBKDF2-HMAC-SHA256 calibrado por dispositivo (OWASP)</div>
-                <div class="help-item-desc">Tu contraseña maestra pasa por entre 600.000 y 1.000.000 de iteraciones — calibradas automáticamente para que el proceso tome entre 250ms y 500ms en tu dispositivo específico. Esto hace que los ataques de fuerza bruta sean extremadamente costosos incluso con hardware especializado.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Metadatos autenticados (AAD)</div>
-                <div class="help-item-desc">Cada blob cifrado usa Additional Authenticated Data (AAD) que vincula el ciphertext a su header KDF. Si alguien intenta manipular los parámetros de cifrado en el almacenamiento, el descifrado falla automáticamente — los datos no pueden ser re-enrutados ni modificados silenciosamente.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Zero Knowledge — todo en tu dispositivo</div>
-                <div class="help-item-desc">Ni Hades, ni ningún servidor, ni nadie externo conoce tu contraseña maestra ni tus datos. No hay servidores externos, no hay nube propia, no hay telemetría. Tu bóveda vive cifrada solo en tu dispositivo.</div>
-              </div>
-            </div>
+          <div class="glass-card help-card">
+            <h3>Qué protege Hades</h3>
+            <ul>
+              <li>Tus datos están cifrados con AES-256-GCM antes de guardarse</li>
+              <li>Nadie sin tu contraseña puede leer tus entradas, ni el desarrollador</li>
+              <li>El backup exportado está completamente cifrado</li>
+              <li>PBKDF2 con 600,000 iteraciones hace el brute force muy costoso</li>
+            </ul>
           </div>
-
-          <div class="glass-card settings-card">
-            <h2>🔑 Acceso y autenticación</h2>
-            <div class="help-block">
-              <div class="help-item">
-                <div class="help-item-title">Tres modos de acceso</div>
-                <div class="help-item-desc">Puedes configurar tu acceso en Ajustes: solo contraseña maestra, solo huella dactilar (más cómodo), o huella + contraseña para máxima seguridad. Puedes cambiar el modo en cualquier momento — requiere verificación de identidad previa.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Huella dactilar (WebAuthn)</div>
-                <div class="help-item-desc">La autenticación biométrica usa el estándar WebAuthn. Tu huella nunca sale del sensor del dispositivo — Hades solo recibe una confirmación de identidad, y con ella descifra automáticamente tu contraseña maestra. Es tan seguro como usar la contraseña directamente.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Reautenticación para acciones sensibles</div>
-                <div class="help-item-desc">Exportar, importar, cambiar contraseña, gestionar huella o ver datos de tarjeta completos requieren que verifiques tu identidad nuevamente, incluso si la sesión está abierta. Esta ventana de verificación dura 120 segundos y se invalida automáticamente tras eventos críticos.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Límite de intentos fallidos</div>
-                <div class="help-item-desc">Tras 3 intentos fallidos de contraseña, el acceso queda bloqueado y debes usar tu frase de recuperación de 12 palabras para restablecer el acceso.</div>
-              </div>
-            </div>
+          <div class="glass-card help-card">
+            <h3>Límites que debes saber</h3>
+            <ul>
+              <li>Mientras la app está desbloqueada, la clave está en memoria del navegador</li>
+              <li>El navegador puede limpiar IndexedDB bajo presión de almacenamiento</li>
+              <li>Si pierdes tu contraseña Y tu frase de recuperación, los datos son irrecuperables</li>
+              <li>La biometría está ligada al dominio: si cambias de dominio, perderás el credencial biométrico (pero siempre puedes usar contraseña)</li>
+            </ul>
           </div>
-
-          <div class="glass-card settings-card">
-            <h2>🛡️ Frase de recuperación</h2>
-            <div class="help-block">
-              <div class="help-item">
-                <div class="help-item-title">12 palabras que son tu llave maestra</div>
-                <div class="help-item-desc">Al registrarte, Hades genera automáticamente 12 palabras aleatorias. Anótalas en papel y guárdalas en un lugar seguro — son tu único recurso si olvidas tu contraseña maestra. Funcionan como las wallets de Bitcoin: sin ellas no hay recuperación posible.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Almacenamiento irreversible</div>
-                <div class="help-item-desc">Las 12 palabras nunca se guardan en el dispositivo. Solo se almacena un verificador criptográfico derivado con PBKDF2 y una sal aleatoria única — es imposible reconstruir las palabras originales desde ese verificador.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Qué ocurre al recuperar acceso</div>
-                <div class="help-item-desc">Si usas la frase de recuperación, podrás crear una nueva contraseña maestra. La bóveda anterior no puede recuperarse sin la contraseña original — se iniciará una bóveda nueva y se te pedirá anotar una nueva frase de recuperación.</div>
-              </div>
-            </div>
+          <div class="glass-card help-card">
+            <h3>Recomendaciones</h3>
+            <ul>
+              <li>Exporta un backup regularmente desde Ajustes</li>
+              <li>Guarda la frase de recuperación en papel, en lugar seguro</li>
+              <li>Usa una contraseña maestra larga y única (mínimo 12 caracteres)</li>
+              <li>Activa el auto-bloqueo en 5 minutos</li>
+            </ul>
           </div>
-
-          <div class="glass-card settings-card">
-            <h2>📦 Backup y restauración</h2>
-            <div class="help-block">
-              <div class="help-item">
-                <div class="help-item-title">Formato de backup v3.0 (cifrado)</div>
-                <div class="help-item-desc">El archivo de backup (.hades) contiene tu bóveda cifrada, la clave DEK cifrada con tu KEK, los parámetros KDF y el verificador de frase. Todos los datos sensibles van cifrados — sin tu contraseña maestra, el backup es ilegible para cualquiera.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Restauración segura con rollback</div>
-                <div class="help-item-desc">Al importar un backup, Hades toma una fotografía del estado actual de tu bóveda antes de escribir nada. Si la importación falla en cualquier punto, tu bóveda anterior se restaura íntegramente — nunca perderás acceso a tus datos por una importación fallida.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Límite y validación del archivo</div>
-                <div class="help-item-desc">Hades valida estrictamente el archivo antes de importar: tamaño máximo 512KB, formato JSON válido, campos obligatorios, base64 válido y consistencia entre versión y parámetros KDF. Un backup corrupto o manipulado es rechazado antes de escribir cualquier dato.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Haz backups regularmente</div>
-                <div class="help-item-desc">Exporta tu bóveda periódicamente desde Ajustes. Guarda el archivo en un lugar seguro — correo personal, disco externo o USB. Si pierdes el dispositivo, el backup + tu contraseña maestra son suficientes para recuperar todo.</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="glass-card settings-card">
-            <h2>💡 Consejos de seguridad</h2>
-            <div class="help-block">
-              <div class="help-item">
-                <div class="help-item-title">Elige una contraseña maestra fuerte</div>
-                <div class="help-item-desc">Usa al menos 12 caracteres mezclando mayúsculas, minúsculas, números y símbolos. Esta es la única contraseña que deberás recordar — no la escribas en papel junto a la frase de recuperación.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Guarda la frase de recuperación separada de la contraseña</div>
-                <div class="help-item-desc">Si alguien obtiene ambas, tiene acceso completo. Guárdalas en lugares distintos — la frase en papel en casa, la contraseña en tu memoria o en un lugar diferente.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Usa contraseñas únicas para cada servicio</div>
-                <div class="help-item-desc">Nunca repitas contraseñas. El generador de Hades crea contraseñas aleatorias y seguras en un toque — úsalo cada vez que crees una cuenta nueva.</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Activa el auto-bloqueo</div>
-                <div class="help-item-desc">Configura un tiempo de inactividad corto en Ajustes — recomendamos 5 minutos. Si alguien toma tu celular desbloqueado, Hades se bloqueará automáticamente.</div>
-              </div>
-            </div>
-          </div>
-
-        </div>
-      </div>
-
-      <!-- ── ABOUT ── -->
-      <div id="view-about" class="view hidden">
-        <div class="info-container">
-
-          <div class="glass-card about-hero-card">
-            <div class="about-logo-wrap">
-              <img src="icons/icon-192.png" alt="Hades" class="about-logo" />
-            </div>
-            <h1 class="about-app-name">Hades <span>2.1</span></h1>
-            <p class="about-tagline">Gestor de contraseñas seguro · 2026</p>
-          </div>
-
-          <div class="glass-card settings-card">
-            <h2>✨ El origen</h2>
-            <div class="help-block">
-              <div class="help-item">
-                <div class="help-item-desc about-story">
-                  Hades nació en 2026 como una idea personal de <strong>Claudio González Díaz</strong> — la visión de tener un gestor de contraseñas propio, seguro, elegante y completamente bajo su control. Sin suscripciones, sin servidores externos, sin depender de nadie.
-                  <br /><br />
-                  Lo que comenzó como una conversación se transformó en una app real gracias a la colaboración con <strong>Claude</strong>, la inteligencia artificial desarrollada por Anthropic — quien tomó cada idea, cada pensamiento y cada visión de Claudio, y los convirtió en código funcional, diseño pulido y una experiencia que realmente funciona.
-                  <br /><br />
-                  Un proyecto donde la creatividad humana y la capacidad de la IA demostraron que juntos pueden construir algo genuinamente útil y hermoso.
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="glass-card settings-card">
-            <h2>👥 Créditos</h2>
-            <div class="about-credits">
-              <div class="credit-card">
-                <div class="credit-avatar">CG</div>
-                <div class="credit-info">
-                  <div class="credit-name">Claudio González Díaz</div>
-                  <div class="credit-role">Co-Engineer · Visión &amp; Diseño</div>
-                  <div class="credit-desc">Ideas, dirección creativa, experiencia de usuario y el alma detrás de Hades.</div>
-                </div>
-              </div>
-              <div class="credit-divider"></div>
-              <div class="credit-card">
-                <div class="credit-avatar ai-avatar">AI</div>
-                <div class="credit-info">
-                  <div class="credit-name">Claude</div>
-                  <div class="credit-role">Co-Engineer · Desarrollo &amp; Arquitectura</div>
-                  <div class="credit-desc">Desarrollo completo, cifrado, diseño liquid glass, PWA y todo el código que da vida a la visión de Claudio.</div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="glass-card settings-card">
-            <h2>📋 Información técnica</h2>
-            <div class="help-block">
-              <div class="help-item">
-                <div class="help-item-title">Versión</div>
-                <div class="help-item-desc">Hades 2.1 · 2026</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Tecnología</div>
-                <div class="help-item-desc">PWA · HTML · CSS · JavaScript · Web Crypto API</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Cifrado</div>
-                <div class="help-item-desc">AES-256-GCM + PBKDF2-SHA-256 · 310.000 iteraciones</div>
-              </div>
-              <div class="help-item">
-                <div class="help-item-title">Almacenamiento</div>
-                <div class="help-item-desc">100% local · Sin servidores · Sin nube · Sin telemetría</div>
-              </div>
-            </div>
-          </div>
-
         </div>
       </div>
 
@@ -680,8 +433,11 @@
   </div>
 
   <!-- ═══════════════ MODALS ═══════════════ -->
+
+  <!-- Modal: Nueva/Editar entrada -->
   <div id="modal-entry" class="modal-overlay hidden">
-    <div class="glass-card modal-card" role="dialog" aria-modal="true">
+    <div class="glass-card modal-card tilt-card" role="dialog" aria-modal="true">
+      <div class="card-glow"></div>
       <div class="modal-header">
         <h2 id="modal-entry-title">Nueva entrada</h2>
         <button class="icon-btn" id="modal-entry-close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
@@ -697,39 +453,39 @@
           </select>
         </div>
         <div id="fields-login">
-          <div class="field-group"><label>Nombre del sitio / App</label><div class="glass-input-wrap"><input type="text" id="f-name" placeholder="Google, GitHub, Netflix…" /></div></div>
+          <div class="field-group"><label>Nombre / Sitio</label><div class="glass-input-wrap"><input type="text" id="f-name" placeholder="Google, GitHub…" /></div></div>
           <div class="field-group"><label>URL</label><div class="glass-input-wrap"><input type="url" id="f-url" placeholder="https://…" /></div></div>
-          <div class="field-group"><label>Usuario / Email</label><div class="glass-input-wrap"><input type="text" id="f-username" placeholder="usuario@ejemplo.com" autocomplete="off" /></div></div>
+          <div class="field-group"><label>Usuario / Email</label><div class="glass-input-wrap"><input type="text" id="f-username" autocomplete="off" /></div></div>
           <div class="field-group"><label>Contraseña</label>
             <div class="glass-input-wrap">
-              <input type="password" id="f-password" placeholder="••••••••" autocomplete="off" />
-              <button class="eye-btn" data-target="f-password"><svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
-              <button class="gen-mini-btn" id="btn-gen-quick" title="Generar"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></button>
+              <input type="password" id="f-password" autocomplete="off" />
+              <button class="eye-btn" data-target="f-password" type="button"><svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+              <button class="gen-mini-btn" id="btn-gen-quick" type="button" title="Generar"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></button>
             </div>
           </div>
-          <div class="field-group"><label>Notas</label><textarea class="glass-textarea" id="f-notes" placeholder="Notas opcionales…" rows="3"></textarea></div>
+          <div class="field-group"><label>Notas</label><textarea class="glass-textarea" id="f-notes" rows="3"></textarea></div>
         </div>
         <div id="fields-card" class="hidden">
-          <div class="field-group"><label>Nombre en la tarjeta</label><div class="glass-input-wrap"><input type="text" id="c-name" placeholder="John Doe" /></div></div>
-          <div class="field-group"><label>Número de tarjeta</label><div class="glass-input-wrap"><input type="text" id="c-number" placeholder="•••• •••• •••• ••••" maxlength="19" /></div></div>
+          <div class="field-group"><label>Nombre en la tarjeta</label><div class="glass-input-wrap"><input type="text" id="c-name" /></div></div>
+          <div class="field-group"><label>Número</label><div class="glass-input-wrap"><input type="text" id="c-number" placeholder="•••• •••• •••• ••••" maxlength="19" /></div></div>
           <div class="field-row">
             <div class="field-group"><label>Vencimiento</label><div class="glass-input-wrap"><input type="text" id="c-expiry" placeholder="MM/AA" maxlength="5" /></div></div>
-            <div class="field-group"><label>CVV</label><div class="glass-input-wrap"><input type="password" id="c-cvv" placeholder="•••" maxlength="4" /></div></div>
+            <div class="field-group"><label>CVV</label><div class="glass-input-wrap"><input type="password" id="c-cvv" maxlength="4" /></div></div>
           </div>
-          <div class="field-group"><label>Notas</label><textarea class="glass-textarea" id="c-notes" placeholder="Notas opcionales…" rows="2"></textarea></div>
+          <div class="field-group"><label>Notas</label><textarea class="glass-textarea" id="c-notes" rows="2"></textarea></div>
         </div>
         <div id="fields-note" class="hidden">
-          <div class="field-group"><label>Título</label><div class="glass-input-wrap"><input type="text" id="n-title" placeholder="Título de la nota" /></div></div>
-          <div class="field-group"><label>Contenido</label><textarea class="glass-textarea" id="n-content" placeholder="Tu nota segura…" rows="6"></textarea></div>
+          <div class="field-group"><label>Título</label><div class="glass-input-wrap"><input type="text" id="n-title" /></div></div>
+          <div class="field-group"><label>Contenido</label><textarea class="glass-textarea" id="n-content" rows="6"></textarea></div>
         </div>
         <div id="fields-identity" class="hidden">
           <div class="field-row">
-            <div class="field-group"><label>Nombre</label><div class="glass-input-wrap"><input type="text" id="i-first" placeholder="Nombre" /></div></div>
-            <div class="field-group"><label>Apellido</label><div class="glass-input-wrap"><input type="text" id="i-last" placeholder="Apellido" /></div></div>
+            <div class="field-group"><label>Nombre</label><div class="glass-input-wrap"><input type="text" id="i-first" /></div></div>
+            <div class="field-group"><label>Apellido</label><div class="glass-input-wrap"><input type="text" id="i-last" /></div></div>
           </div>
-          <div class="field-group"><label>Email</label><div class="glass-input-wrap"><input type="email" id="i-email" placeholder="correo@ejemplo.com" /></div></div>
-          <div class="field-group"><label>Teléfono</label><div class="glass-input-wrap"><input type="tel" id="i-phone" placeholder="+56 9 1234 5678" /></div></div>
-          <div class="field-group"><label>Dirección</label><textarea class="glass-textarea" id="i-address" placeholder="Dirección completa…" rows="2"></textarea></div>
+          <div class="field-group"><label>Email</label><div class="glass-input-wrap"><input type="email" id="i-email" /></div></div>
+          <div class="field-group"><label>Teléfono</label><div class="glass-input-wrap"><input type="tel" id="i-phone" /></div></div>
+          <div class="field-group"><label>Dirección</label><textarea class="glass-textarea" id="i-address" rows="2"></textarea></div>
         </div>
       </div>
       <div class="modal-footer">
@@ -739,10 +495,11 @@
     </div>
   </div>
 
+  <!-- Modal: Ver entrada -->
   <div id="modal-view" class="modal-overlay hidden">
     <div class="glass-card modal-card" role="dialog" aria-modal="true">
       <div class="modal-header">
-        <h2 id="view-entry-name">—</h2>
+        <h2 id="view-entry-title">—</h2>
         <button class="icon-btn" id="modal-view-close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
       <div class="modal-body" id="view-entry-body"></div>
@@ -753,8 +510,9 @@
     </div>
   </div>
 
+  <!-- Modal: Confirmación genérica -->
   <div id="modal-confirm" class="modal-overlay hidden">
-    <div class="glass-card modal-card small" role="dialog" aria-modal="true">
+    <div class="glass-card modal-card modal-sm" role="dialog" aria-modal="true">
       <div class="modal-header"><h2 id="confirm-title">¿Confirmar?</h2></div>
       <div class="modal-body"><p id="confirm-msg"></p></div>
       <div class="modal-footer">
@@ -764,16 +522,45 @@
     </div>
   </div>
 
+  <!-- Modal: Reautenticación -->
+  <div id="modal-reauth" class="modal-overlay hidden">
+    <div class="glass-card modal-card modal-sm tilt-card" role="dialog" aria-modal="true">
+      <div class="card-glow card-glow-amber"></div>
+      <div class="modal-header">
+        <h2>Verificar identidad</h2>
+      </div>
+      <div class="modal-body">
+        <p id="reauth-action-msg" class="reauth-msg">Esta acción requiere verificación.</p>
+        <div class="field-group">
+          <label>Contraseña maestra</label>
+          <div class="glass-input-wrap">
+            <input type="password" id="reauth-password" placeholder="••••••••" autocomplete="current-password" />
+            <button class="eye-btn" data-target="reauth-password" type="button">
+              <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </div>
+        <p id="reauth-error" class="error-msg hidden">Contraseña incorrecta</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-ghost" id="reauth-cancel">Cancelar</button>
+        <button class="btn-primary" id="reauth-ok">Verificar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Cambiar contraseña maestra -->
   <div id="modal-change-master" class="modal-overlay hidden">
-    <div class="glass-card modal-card" role="dialog" aria-modal="true">
+    <div class="glass-card modal-card tilt-card" role="dialog" aria-modal="true">
+      <div class="card-glow"></div>
       <div class="modal-header">
         <h2>Cambiar contraseña maestra</h2>
         <button class="icon-btn" id="modal-cm-close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
       <div class="modal-body">
-        <div class="field-group"><label>Contraseña actual</label><div class="glass-input-wrap"><input type="password" id="cm-current" placeholder="••••••••" /></div></div>
-        <div class="field-group"><label>Nueva contraseña</label><div class="glass-input-wrap"><input type="password" id="cm-new" placeholder="Mínimo 8 caracteres" /></div></div>
-        <div class="field-group"><label>Confirmar nueva</label><div class="glass-input-wrap"><input type="password" id="cm-confirm" placeholder="Repetir nueva contraseña" /></div></div>
+        <div class="field-group"><label>Contraseña actual</label><div class="glass-input-wrap"><input type="password" id="cm-current" /></div></div>
+        <div class="field-group"><label>Nueva contraseña</label><div class="glass-input-wrap"><input type="password" id="cm-new" placeholder="Mínimo 10 caracteres" /></div></div>
+        <div class="field-group"><label>Confirmar nueva</label><div class="glass-input-wrap"><input type="password" id="cm-confirm" /></div></div>
         <p id="cm-error" class="error-msg hidden"></p>
       </div>
       <div class="modal-footer">
@@ -783,7 +570,25 @@
     </div>
   </div>
 
+  <!-- Modal: Importar — confirmar contraseña -->
+  <div id="modal-import-pw" class="modal-overlay hidden">
+    <div class="glass-card modal-card modal-sm" role="dialog" aria-modal="true">
+      <div class="modal-header"><h2>Verificar backup</h2></div>
+      <div class="modal-body">
+        <p>Ingresa la contraseña del backup para importarlo.</p>
+        <div class="field-group"><div class="glass-input-wrap"><input type="password" id="import-pw-input" placeholder="Contraseña del backup" /></div></div>
+        <p id="import-pw-error" class="error-msg hidden"></p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-ghost" id="import-pw-cancel">Cancelar</button>
+        <button class="btn-primary" id="import-pw-ok">Importar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
   <div id="toast" class="toast hidden" role="alert" aria-live="polite"></div>
+
   <script src="app.js"></script>
 </body>
 </html>

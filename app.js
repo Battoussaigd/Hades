@@ -1,2227 +1,1360 @@
-/* ═══════════════════════════════════════════
-   HADES 2.1 — app.js
-   Cifrado: AES-256-GCM + PBKDF2-HMAC-SHA256 (OWASP)
-   Arquitectura KEK/DEK con separación de claves
-   KDF auto-calibrado por dispositivo (OWASP)
-   Formato criptográfico v3 con AAD y versionado
-   Sin contraseñas en memoria plana.
+/* ═══════════════════════════════════════════════════════════════
+   HADES V2 — app.js
+   Arquitectura: DB → Crypto → Recovery → Biometric → Reauth →
+                 Backup → State → UI → App → Init
+   ═══════════════════════════════════════════════════════════════ */
 
-   ARQUITECTURA DE CLAVES:
-   ┌─────────────────────────────────────────┐
-   │ KEK (Key Encryption Key)                │
-   │   Derivada de contraseña maestra        │
-   │   PBKDF2-HMAC-SHA256, salt única 32B    │
-   │   Uso: wrappear la DEK                  │
-   ├─────────────────────────────────────────┤
-   │ DEK (Data Encryption Key)               │
-   │   Aleatoria 256 bits por bóveda         │
-   │   Uso: cifrar entradas del vault        │
-   │   Almacenada: cifrada con KEK           │
-   ├─────────────────────────────────────────┤
-   │ Recovery Verifier                       │
-   │   PBKDF2 de frase 12 palabras           │
-   │   Solo para verificación, no descifrado │
-   ├─────────────────────────────────────────┤
-   │ Biometric Key                           │
-   │   PBKDF2 de credentialId               │
-   │   Uso: cifrar contraseña maestra        │
-   └─────────────────────────────────────────┘
-
-   FORMATO CRIPTOGRÁFICO v3:
-   hades_vault_dek: base64(iv[12] || AES-GCM(KEK, DEK_raw, AAD=kdf_header))
-   hades_vault:     base64(iv[12] || AES-GCM(DEK, entries_json, AAD=vault_aad))
-   hades_meta:      base64(iv[12] || AES-GCM(KEK, {ok,v,kdf_hash}, AAD=kdf_header))
-   hades_kdf:       {kdf,version,iterations,salt}
-
-   VIDA ÚTIL DE CLAVES Y EVENTOS DE REKEY:
-   - KEK: se regenera en cambio de contraseña maestra, recovery, sospecha de compromiso
-   - DEK: se regenera en cambio de contraseña maestra, importación de backup
-   - Biometric Key: se regenera en reenrolamiento biométrico
-   - Recovery verifier: se regenera en reset de contraseña, a petición del usuario
-   ═══════════════════════════════════════════ */
 'use strict';
 
-// ── KDF CALIBRATION ──────────────────────────────────
-/**
- * Mide cuántas iteraciones PBKDF2-HMAC-SHA256 puede ejecutar
- * el dispositivo en el rango objetivo [250ms, 500ms].
- * Piso: 600,000 (OWASP 2023). Techo: 1,000,000.
- * Se ejecuta una sola vez en el registro y se persiste en el header KDF.
- */
-async function calibrateKDF() {
-  const FLOOR = 600_000;
-  const CEILING = 1_000_000;
-  const TARGET_MIN_MS = 250;
-  const TARGET_MAX_MS = 500;
-  const PROBE_ITERS = 100_000;
+// ─────────────────────────────────────────────
+// HADES-V2-STORAGE: IndexedDB Module
+// ─────────────────────────────────────────────
+const DB = (() => {
+  let _db = null;
+  const NAME = 'hades_v2';
+  const VER  = 1;
+  const STORES = ['kdf_header','crypto_blobs','vault','staging','import_staging'];
 
-  const enc = new TextEncoder();
-  const probeKey = await crypto.subtle.importKey(
-    'raw', enc.encode('calibration-probe'), 'PBKDF2', false, ['deriveKey']
-  );
-  const probeSalt = crypto.getRandomValues(new Uint8Array(16));
+  async function open() {
+    if (_db) return _db;
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(NAME, VER);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        STORES.forEach(s => { if (!db.objectStoreNames.contains(s)) db.createObjectStore(s); });
+      };
+      req.onsuccess = e => { _db = e.target.result; resolve(_db); };
+      req.onerror   = e => reject(e.target.error);
+    });
+  }
 
-  const t0 = performance.now();
-  await crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt: probeSalt, iterations: PROBE_ITERS, hash: 'SHA-256' },
-    probeKey,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt']
-  );
-  const elapsed = performance.now() - t0;
+  async function tx(stores, mode, fn) {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const t = db.transaction(stores, mode);
+      t.oncomplete = () => resolve();
+      t.onerror = t.onabort = e => reject(e.target.error);
+      fn(t);
+    });
+  }
 
-  // Proyectar iteraciones para alcanzar target
-  const msPerIter = elapsed / PROBE_ITERS;
-  const targetMs = (TARGET_MIN_MS + TARGET_MAX_MS) / 2; // 375ms
-  const projected = Math.round(targetMs / msPerIter);
+  async function get(store, key) {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const req = db.transaction(store, 'readonly').objectStore(store).get(key);
+      req.onsuccess = () => resolve(req.result ?? null);
+      req.onerror = e => reject(e.target.error);
+    });
+  }
 
-  return Math.max(FLOOR, Math.min(CEILING, projected));
-}
+  async function put(store, key, value) {
+    return tx(store, 'readwrite', t => t.objectStore(store).put(value, key));
+  }
 
-// ── CRYPTO ENGINE v3 — KEK/DEK + AAD + Versioned Format ──────
-const Crypto = {
-  // ── Storage keys ──
-  VAULT_KEY:    'hades_vault',      // Vault cifrado con DEK
-  DEK_KEY:      'hades_vault_dek',  // DEK cifrada con KEK (nuevo en v3)
-  KDF_KEY:      'hades_kdf',        // Header KDF público
-  META_KEY:     'hades_meta',       // Verifier cifrado con KEK
-  RECOVERY_KEY: 'hades_recovery',
-  USER_KEY:     'hades_user',
-  BIOMETRIC_KEY:'hades_biometric_id',
+  async function del(store, key) {
+    return tx(store, 'readwrite', t => t.objectStore(store).delete(key));
+  }
 
-  // ── KDF header: {kdf, version, iterations, salt} ──
-  _getKDFHeader() {
-    try { return JSON.parse(localStorage.getItem(this.KDF_KEY)); } catch { return null; }
-  },
-  _saveKDFHeader(h) {
-    localStorage.setItem(this.KDF_KEY, JSON.stringify(h));
-  },
-  _newSalt() {
-    return btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
-  },
+  async function clear(store) {
+    return tx(store, 'readwrite', t => t.objectStore(store).clear());
+  }
 
-  // ── AAD: datos adicionales autenticados — vinculan ciphertext al header KDF ──
-  // Cambiar hades_kdf sin la clave correcta rompe el descifrado.
-  _buildAAD(header, purpose) {
-    const enc = new TextEncoder();
-    // AAD = kdf|version|iterations|salt_completa|purpose
-    // Salt completa para unicidad máxima — evita colisiones entre bóvedas distintas
-    return enc.encode(`${header.kdf}|v${header.version}|${header.iterations}|${header.salt}|${purpose}`);
-  },
+  async function atomicWrite(ops) {
+    const stores = [...new Set(ops.map(o => o.store))];
+    return tx(stores, 'readwrite', t => {
+      ops.forEach(op => {
+        const s = t.objectStore(op.store);
+        if (op.type === 'put')    s.put(op.value, op.key);
+        if (op.type === 'delete') s.delete(op.key);
+        if (op.type === 'clear')  s.clear();
+      });
+    });
+  }
 
-  // ── Derivar KEK (Key Encryption Key) desde contraseña maestra ──
-  async deriveKEK(password, saltB64, iterations) {
-    const enc = new TextEncoder();
-    const salt = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
-    const base = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']);
+  async function hasVault() {
+    const h = await get('kdf_header', 'header');
+    return !!h;
+  }
+
+  async function snapshot() {
+    const header = await get('kdf_header', 'header');
+    const blobs  = await get('crypto_blobs', 'blobs');
+    const vault  = await get('vault', 'data');
+    if (!header || !blobs) return null;
+    const snap = { ts: Date.now(), header, blobs, vault };
+    await put('staging', 'snap', snap);
+    return snap;
+  }
+
+  async function rollback() {
+    const snap = await get('staging', 'snap');
+    if (!snap) return false;
+    const ops = [
+      { store: 'kdf_header',   type: 'put', key: 'header', value: snap.header },
+      { store: 'crypto_blobs', type: 'put', key: 'blobs',  value: snap.blobs  },
+    ];
+    if (snap.vault) ops.push({ store: 'vault', type: 'put', key: 'data', value: snap.vault });
+    else            ops.push({ store: 'vault', type: 'clear' });
+    await atomicWrite(ops);
+    await del('staging', 'snap');
+    return true;
+  }
+
+  return { open, get, put, del, clear, atomicWrite, hasVault, snapshot, rollback };
+})();
+
+// ─────────────────────────────────────────────
+// HADES-V2-CRYPTO: Cryptographic Module
+// ─────────────────────────────────────────────
+const Crypto = (() => {
+  const ITERATIONS = 600_000;
+  const HASH = 'SHA-256';
+
+  function rand(n)    { return crypto.getRandomValues(new Uint8Array(n)); }
+  function b64(buf)   { return btoa(String.fromCharCode(...new Uint8Array(buf))); }
+  function unb64(s)   { return Uint8Array.from(atob(s), c => c.charCodeAt(0)); }
+  function newSalt()  { return b64(rand(32)); }
+
+  function buildAAD(header, context) {
+    const s = JSON.stringify({ kdf: header.kdf, version: header.version, salt: header.salt, context });
+    return new TextEncoder().encode(s);
+  }
+
+  async function deriveKEK(password, saltB64) {
+    const base = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']
+    );
     return crypto.subtle.deriveKey(
-      { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
+      { name: 'PBKDF2', salt: unb64(saltB64), iterations: ITERATIONS, hash: HASH },
       base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
     );
-  },
+  }
 
-  // ── Generar DEK aleatoria (Data Encryption Key) ──
-  async generateDEK() {
+  async function generateDEK() {
     return crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
-  },
+  }
 
-  // ── Exportar DEK como raw bytes ──
-  async exportDEK(dek) {
-    const raw = await crypto.subtle.exportKey('raw', dek);
-    return new Uint8Array(raw);
-  },
+  async function exportDEK(dek) {
+    return b64(await crypto.subtle.exportKey('raw', dek));
+  }
 
-  // ── Importar DEK desde raw bytes ──
-  async importDEK(raw) {
-    return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
-  },
+  async function importDEK(dekB64) {
+    return crypto.subtle.importKey('raw', unb64(dekB64), { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+  }
 
-  // ── Cifrado AES-GCM con IV único + AAD opcional ──
-  // Formato blob: version(1) || iv(12) || ciphertext
-  // version byte: 0x03 = v3
-  async _encrypt(key, data, aad = null) {
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const enc = new TextEncoder();
-    const plain = typeof data === 'string' ? enc.encode(data) : enc.encode(JSON.stringify(data));
-    const params = aad ? { name: 'AES-GCM', iv, additionalData: aad } : { name: 'AES-GCM', iv };
-    const buf = await crypto.subtle.encrypt(params, key, plain);
-    // version(1) + iv(12) + ciphertext
-    const combined = new Uint8Array(1 + 12 + buf.byteLength);
-    combined[0] = 0x03; // formato v3
-    combined.set(iv, 1);
-    combined.set(new Uint8Array(buf), 13);
-    return btoa(String.fromCharCode(...combined));
-  },
+  async function encrypt(key, data, aad) {
+    const iv      = rand(12);
+    const encoded = new TextEncoder().encode(JSON.stringify(data));
+    const params  = { name: 'AES-GCM', iv };
+    if (aad) params.additionalData = aad;
+    const ct = await crypto.subtle.encrypt(params, key, encoded);
+    return { v: 2, iv: b64(iv), ct: b64(ct) };
+  }
 
-  // ── Descifrado AES-GCM — soporta v2 (sin version byte) y v3 ──
-  async _decrypt(key, b64, aad = null) {
-    const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-    let iv, data;
-    if (raw[0] === 0x03) {
-      // Formato v3: version(1) + iv(12) + ciphertext
-      iv = raw.slice(1, 13);
-      data = raw.slice(13);
-    } else {
-      // Formato v2 legacy: iv(12) + ciphertext (sin version byte)
-      iv = raw.slice(0, 12);
-      data = raw.slice(12);
-      aad = null; // v2 no tiene AAD
-    }
-    const params = aad ? { name: 'AES-GCM', iv, additionalData: aad } : { name: 'AES-GCM', iv };
-    const buf = await crypto.subtle.decrypt(params, key, data);
+  async function decrypt(key, blob, aad) {
+    const iv     = unb64(blob.iv);
+    const ct     = unb64(blob.ct);
+    const params = { name: 'AES-GCM', iv };
+    if (aad) params.additionalData = aad;
+    const buf = await crypto.subtle.decrypt(params, key, ct);
     return JSON.parse(new TextDecoder().decode(buf));
-  },
+  }
 
-  // ── Compat shim: encrypt/decrypt sin AAD ──
-  // NOTA: solo usar para datos no críticos o flujos legacy. Preferir _encrypt/_decrypt con AAD.
-  async encrypt(key, data) { return this._encrypt(key, data, null); },
-  async decrypt(key, b64)  { return this._decrypt(key, b64, null); },
+  async function initVault(password, userName) {
+    const salt   = newSalt();
+    const header = { kdf: 'PBKDF2-SHA256', version: 2, iterations: ITERATIONS, salt };
+    const aadDek = buildAAD(header, 'dek');
+    const aadVlt = buildAAD(header, 'vault');
+    const aadVer = buildAAD(header, 'verifier');
 
-  // ── DEK I/O: cifrar/descifrar DEK con KEK + AAD ──
-  async saveDEK(kek, dekRaw, header) {
-    const aad = this._buildAAD(header, 'dek');
-    const dekB64 = btoa(String.fromCharCode(...dekRaw));
-    const enc = await this._encrypt(kek, dekB64, aad);
-    localStorage.setItem(this.DEK_KEY, enc);
-  },
-  async loadDEK(kek, header) {
-    const enc = localStorage.getItem(this.DEK_KEY);
-    if (!enc) return null;
-    const aad = this._buildAAD(header, 'dek');
-    const dekB64 = await this._decrypt(kek, enc, aad);
-    const raw = Uint8Array.from(atob(dekB64), c => c.charCodeAt(0));
-    return this.importDEK(raw);
-  },
+    const kek    = await deriveKEK(password, salt);
+    const dek    = await generateDEK();
+    const dekB64 = await exportDEK(dek);
 
-  // ── Vault I/O con DEK ──
-  async saveVault(dek, entries, header) {
-    const aad = this._buildAAD(header || this._getKDFHeader(), 'vault');
-    const enc = await this._encrypt(dek, entries, aad);
-    localStorage.setItem(this.VAULT_KEY, enc);
-  },
-  async loadVault(dek, header) {
-    const enc = localStorage.getItem(this.VAULT_KEY);
-    if (!enc) return [];
-    const aad = this._buildAAD(header || this._getKDFHeader(), 'vault');
-    return this._decrypt(dek, enc, aad);
-  },
-  hasVault() { return !!localStorage.getItem(this.VAULT_KEY); },
+    const dekEnc  = await encrypt(kek, dekB64, aadDek);
+    const vaultEnc = await encrypt(dek, [], aadVlt);
+    const verifierEnc = await encrypt(kek, { ok: true, v: 2, user: userName }, aadVer);
 
-  // ── Usuario ──
-  saveUser(name, email) {
-    localStorage.setItem(this.USER_KEY, JSON.stringify({ name, email }));
-  },
-  getUser() {
-    try { return JSON.parse(localStorage.getItem(this.USER_KEY)) || null; } catch { return null; }
-  },
+    // Validate in memory before writing
+    const testDekB64 = await decrypt(kek, dekEnc, aadDek);
+    const testDek    = await importDEK(testDekB64);
+    const testVault  = await decrypt(testDek, vaultEnc, aadVlt);
+    const testVer    = await decrypt(kek, verifierEnc, aadVer);
+    if (!Array.isArray(testVault) || !testVer?.ok) throw new Error('initVault: pre-write validation failed');
 
-  // ── Recuperación ──
-  // Normalización estable: trim + lowercase + orden exacto de palabras
-  _normalizePhrase(words) {
-    return words.map(w => w.trim().toLowerCase().replace(/\s+/g, '')).join('|');
-  },
-  //
-  // saveRecovery: guarda recovery_verifier con PBKDF2 + salt aleatoria única.
-  // La frase NUNCA se guarda — solo el verifier irreversible.
-  // Estructura en localStorage['hades_recovery']:
-  // { kdf:"PBKDF2-SHA256", version:1, iterations:600000, salt:<b64 32B>, verifier:<b64 256b> }
-  //
-  // Iteraciones: 300k justificado por alta entropía base de frase de 12 palabras (~130 bits).
-  //
-  async saveRecovery(phrase) {
-    const normalized = this._normalizePhrase(phrase);
-    const enc = new TextEncoder();
-    const saltRaw = crypto.getRandomValues(new Uint8Array(32));
-    const salt = btoa(String.fromCharCode(...saltRaw));
-    // 600k iteraciones (OWASP) — justificado por entropía base alta (~130 bits en 12 palabras)
-    const iterations = 600000;
-    const keyMaterial = await crypto.subtle.importKey(
-      'raw', enc.encode(normalized), 'PBKDF2', false, ['deriveBits']
-    );
-    const bits = await crypto.subtle.deriveBits(
-      { name: 'PBKDF2', salt: saltRaw, iterations, hash: 'SHA-256' },
-      keyMaterial, 256
-    );
-    const verifier = btoa(String.fromCharCode(...new Uint8Array(bits)));
-    const record = { kdf: 'PBKDF2-SHA256', version: 1, iterations, salt, verifier };
-    localStorage.setItem(this.RECOVERY_KEY, JSON.stringify(record));
-  },
-  //
-  // verifyRecovery: deriva el verifier con los mismos parámetros y compara
-  // en tiempo constante. No descifra nada reversible.
-  //
-  async verifyRecovery(words) {
+    await DB.atomicWrite([
+      { store: 'kdf_header',   type: 'put', key: 'header', value: header },
+      { store: 'crypto_blobs', type: 'put', key: 'blobs',  value: { dekEnc, verifierEnc } },
+      { store: 'vault',        type: 'put', key: 'data',   value: vaultEnc },
+    ]);
+
+    return { dek, dekB64 };
+  }
+
+  async function verifyPassword(password) {
+    const header = await DB.get('kdf_header', 'header');
+    const blobs  = await DB.get('crypto_blobs', 'blobs');
+    if (!header || !blobs) return null;
     try {
-      const stored = localStorage.getItem(this.RECOVERY_KEY);
-      if (!stored) return false;
-      const record = JSON.parse(stored);
-      if (!record.kdf) return false; // Legacy base64 simple → falla segura
-      const normalized = this._normalizePhrase(words);
-      const enc = new TextEncoder();
-      const saltRaw = Uint8Array.from(atob(record.salt), c => c.charCodeAt(0));
-      const keyMaterial = await crypto.subtle.importKey(
-        'raw', enc.encode(normalized), 'PBKDF2', false, ['deriveBits']
-      );
-      const bits = await crypto.subtle.deriveBits(
-        { name: 'PBKDF2', salt: saltRaw, iterations: record.iterations, hash: 'SHA-256' },
-        keyMaterial, 256
-      );
-      const candidate = btoa(String.fromCharCode(...new Uint8Array(bits)));
-      // Comparación en tiempo constante para evitar timing attacks
-      if (candidate.length !== record.verifier.length) return false;
-      let diff = 0;
-      for (let i = 0; i < candidate.length; i++) {
-        diff |= candidate.charCodeAt(i) ^ record.verifier.charCodeAt(i);
-      }
-      return diff === 0;
-    } catch { return false; }
-  },
-
-  // ── Eliminar bóveda ──
-  deleteVault() {
-    // Limpiar todos los keys de bóveda incluyendo DEK (v3) y legacy
-    [this.VAULT_KEY, this.DEK_KEY, this.KDF_KEY, this.META_KEY, 'hades_salt'].forEach(k =>
-      localStorage.removeItem(k)
-    );
-  },
-
-  // ── Inicializar bóveda nueva (registro) — Arquitectura KEK/DEK v3 ──
-  // KEK: derivada de contraseña maestra (PBKDF2 calibrado)
-  // DEK: aleatoria, cifrada con KEK + AAD
-  // Vault: cifrado con DEK + AAD
-  // Verifier: cifrado con KEK + AAD
-  // Todo validado en memoria antes de escribir en producción (atómico)
-  async initVault(password) {
-    const iterations = await calibrateKDF();
-    const salt = this._newSalt();
-    const header = { kdf: 'PBKDF2-SHA256', version: 3, iterations, salt };
-    const aadVault   = this._buildAAD(header, 'vault');
-    const aadDek     = this._buildAAD(header, 'dek');
-    const aadVerifier= this._buildAAD(header, 'verifier');
-
-    // 1. Derivar KEK
-    const kek = await this.deriveKEK(password, salt, iterations);
-    // 2. Generar DEK aleatoria
-    const dekObj = await this.generateDEK();
-    const dekRaw = await this.exportDEK(dekObj);
-    // 3. Preparar blobs en memoria
-    const dekB64     = btoa(String.fromCharCode(...dekRaw));
-    const dekEnc     = await this._encrypt(kek, dekB64, aadDek);
-    const vaultEnc   = await this._encrypt(dekObj, [], aadVault);
-    const verifier   = await this._encrypt(kek, { ok: true, v: 3 }, aadVerifier);
-    // 4. Validar descifrado en memoria antes de persistir
-    const testDekB64 = await this._decrypt(kek, dekEnc, aadDek);
-    const testDek    = await this.importDEK(Uint8Array.from(atob(testDekB64), c => c.charCodeAt(0)));
-    const testVault  = await this._decrypt(testDek, vaultEnc, aadVault);
-    const testMeta   = await this._decrypt(kek, verifier, aadVerifier);
-    if (!Array.isArray(testVault) || !testMeta?.ok) {
-      throw new Error('initVault: validación pre-escritura fallida');
-    }
-    // 5. Escritura atómica
-    this._saveKDFHeader(header);
-    localStorage.setItem(this.DEK_KEY, dekEnc);
-    localStorage.setItem(this.VAULT_KEY, vaultEnc);
-    localStorage.setItem(this.META_KEY, verifier);
-    // Retornar DEK (no KEK) — State.cryptoKey es la DEK
-    return dekObj;
-  },
-
-
-  // ── verifyPassword v3: soporta v1 (legacy), v2 (intermedio) y v3 (KEK/DEK) ──
-  async verifyPassword(password) {
-    try {
-      const header = this._getKDFHeader();
-
-      // v1 legacy: sin header KDF, salt en hades_salt
-      if (!header) {
-        const oldSaltRaw = localStorage.getItem('hades_salt');
-        if (!oldSaltRaw) return null;
-        const enc = new TextEncoder();
-        const oldSalt = Uint8Array.from(atob(oldSaltRaw), c => c.charCodeAt(0));
-        const base = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']);
-        const oldKey = await crypto.subtle.deriveKey(
-          { name: 'PBKDF2', salt: oldSalt, iterations: 310000, hash: 'SHA-256' },
-          base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
-        );
-        const meta = localStorage.getItem(this.META_KEY);
-        if (!meta) return null;
-        let r; try { r = await this.decrypt(oldKey, meta); } catch { return null; }
-        if (!r?.ok) return null;
-        return this._migrateToV3(password, oldKey, 1);
-      }
-
-      // v2: KEK sin DEK separada, sin AAD
-      if (header.version === 2) {
-        const kek = await this.deriveKEK(password, header.salt, header.iterations);
-        const meta = localStorage.getItem(this.META_KEY);
-        if (!meta) return null;
-        let r; try { r = await this.decrypt(kek, meta); } catch { return null; }
-        if (!r?.ok) return null;
-        return this._migrateToV3(password, kek, 2);
-      }
-
-      // v3: KEK + DEK + AAD
-      if (header.version === 3) {
-        const kek = await this.deriveKEK(password, header.salt, header.iterations);
-        const aad = this._buildAAD(header, 'verifier');
-        const meta = localStorage.getItem(this.META_KEY);
-        if (!meta) return null;
-        let r; try { r = await this._decrypt(kek, meta, aad); } catch { return null; }
-        if (!r?.ok) return null;
-        return this.loadDEK(kek, header);
-      }
-      return null;
+      const kek    = await deriveKEK(password, header.salt);
+      const aadVer = buildAAD(header, 'verifier');
+      const ver    = await decrypt(kek, blobs.verifierEnc, aadVer);
+      if (!ver?.ok) return null;
+      const aadDek = buildAAD(header, 'dek');
+      const dekB64 = await decrypt(kek, blobs.dekEnc, aadDek);
+      const dek    = await importDEK(dekB64);
+      return { kek, dek, dekB64, user: ver.user };
     } catch { return null; }
-  },
+  }
 
-  // ── Migración atómica a v3 con staging + validación + rollback ──
-  async _migrateToV3(password, oldKey, fromVersion) {
-    const ST = 'hades_v3_staging';
-    localStorage.removeItem(ST);
-    // [HADES] Migración iniciada
+  async function loadVault(dek) {
+    const header   = await DB.get('kdf_header', 'header');
+    const vaultEnc = await DB.get('vault', 'data');
+    if (!vaultEnc) return [];
+    return decrypt(dek, vaultEnc, buildAAD(header, 'vault'));
+  }
+
+  async function saveVault(dek, entries) {
+    const header   = await DB.get('kdf_header', 'header');
+    const vaultEnc = await encrypt(dek, entries, buildAAD(header, 'vault'));
+    await DB.put('vault', 'data', vaultEnc);
+  }
+
+  async function changeMasterPassword(oldPwd, newPwd) {
+    const result = await verifyPassword(oldPwd);
+    if (!result) throw new Error('Contraseña actual incorrecta');
+    const header = await DB.get('kdf_header', 'header');
+    const blobs  = await DB.get('crypto_blobs', 'blobs');
+    const newSaltVal = newSalt();
+    const newHeader  = { ...header, salt: newSaltVal };
+    const newKek     = await deriveKEK(newPwd, newSaltVal);
+    const newAadDek  = buildAAD(newHeader, 'dek');
+    const newAadVer  = buildAAD(newHeader, 'verifier');
+    const newDekEnc  = await encrypt(newKek, result.dekB64, newAadDek);
+    const newVerEnc  = await encrypt(newKek, { ok: true, v: 2, user: result.user }, newAadVer);
+    const testB64    = await decrypt(newKek, newDekEnc, newAadDek);
+    if (testB64 !== result.dekB64) throw new Error('changeMasterPassword: validation failed');
+    const newBlobs   = { ...blobs, dekEnc: newDekEnc, verifierEnc: newVerEnc };
+    await DB.atomicWrite([
+      { store: 'kdf_header',   type: 'put', key: 'header', value: newHeader },
+      { store: 'crypto_blobs', type: 'put', key: 'blobs',  value: newBlobs  },
+    ]);
+    return { newKek, newHeader };
+  }
+
+  return {
+    newSalt, buildAAD, deriveKEK, generateDEK, exportDEK, importDEK,
+    encrypt, decrypt, initVault, verifyPassword, loadVault, saveVault, changeMasterPassword
+  };
+})();
+
+// ─────────────────────────────────────────────
+// HADES-V2-RECOVERY: Recovery Phrase Module
+// ─────────────────────────────────────────────
+const Recovery = (() => {
+  // BIP39 English wordlist (2048 words)
+  const W = 'abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual adapt add addict address adjust admit adult advance advice aerobic afford afraid again age agent agree ahead aim air airport aisle alarm album alert alien all alley allow almost alone alpha already also alter always amateur amazing among amount amused analyst anchor ancient anger angle angry animal ankle announce annual another answer antenna antique anxiety any apart apology appear apple approve april arch arctic area arena argue arm armed armor army around arrange arrest arrive arrow art artefact artist artwork aspect assault asset assist assume asthma athlete atom attack attend attitude attract auction audit august aunt author auto autumn average avocado avoid awake aware away awesome awful awkward axis baby bachelor bacon badge bag balance balcony ball bamboo banana banner bar barely bargain barrel base basic basket battle beach bean beauty because become beef before begin behave behind believe below belt bench benefit best betray better between beyond bicycle bid bike bind biology bird birth bitter black blade blame blanket blast bleak bless blind blood blossom blouse blue blur blush board boat body boil bomb bone book boost border boring borrow boss bottom bounce box boy bracket brain brand brave breeze brick bridge brief bright bring brisk broccoli broken bronze broom brother brown brush bubble buddy budget buffalo build bulb bulk bullet bundle bunker burden burger burst bus business busy butter buyer buzz cabbage cabin cable cactus cage cake call calm camera camp can canal cancel candy cannon canvas canyon capable capital captain car carbon card cargo carpet carry cart case cash casino castle casual cat catalog catch category cattle cause caution cave ceiling celery cement census chair chaos chapter charge chase chat cheap check cheese chef cherry chest chicken chief child chimney choice choose chronic chuckle chunk cigar cinnamon circle citizen city civil claim clap clarify claw clay clean clerk clever click client cliff climb clinic clip clock clog close cloth cloud clown club clump cluster clutch coach coast coconut code coffee coil coin collect color column combine come comfort comic common company concert conduct confirm congress connect consider control convince cook cool copper coral core corn correct cost cotton couch country couple course cousin cover coyote crack cradle craft cram crane crash crater crawl crazy cream credit creek crew cricket crime crisp critic cross crouch crowd crucial cruel cruise crumble crunch crush cry crystal cube culture cup cupboard curious current curtain curve cushion custom cute cycle dad damage damp dance danger daring dash daughter dawn day deal debate debris decade december decide decline decorate decrease deer defense define defy degree delay deliver demand demise denial dentist deny depart depend deposit depth deputy derive describe desert design desk despair destroy detail detect develop device devote diagram dial diamond diary dice diesel diet differ digital dignity dilemma dinner dinosaur direct dirt disagree discover disease dish dismiss disorder display distance divert divide divorce dizzy doctor document dog doll dolphin domain donate donkey donor door dose double dove draft dragon drama drastic draw dream dress drift drill drink drip drive drop drum dry duck dumb dune during dust dutch duty dwarf dynamic eager eagle early earn earth easily east easy echo ecology edge edit educate effort egg eight either elbow elder electric elegant element elephant elevator elite else embark embody embrace emerge emotion employ empower empty enable enact endless endorse enemy engage engine enhance enjoy enlist enough enrich enroll ensure enter entire entry envelope episode equal equip erase erode erosion error erupt escape essay essence estate eternal ethics evidence evil evoke evolve exact example excess exchange excite exclude exercise exhaust exhibit exile exist exit exotic expand expire explain expose express extend extra eye fable face faculty fade faint faith fall false fame family famous fan fancy fantasy far fashion fat fatal father fatigue fault favorite feature february federal fee feed feel feet fellow felt fence festival fetch fever few fiber fiction field figure file film filter final find fine finger finish fire firm first fiscal fish fit fitness fix flag flame flash flat flavor flee flight flip float flock floor flower fluid flush fly foam focus fog foil follow food foot force forest forget fork fortune forum forward fossil foster found fox fragile frame frequent fresh friend fringe frog front frost frown frozen fruit fuel fun funny furnace fury future gadget gain galaxy gallery game gap garbage garden garlic garment gas gasp gate gather gauge gaze general genius genre gentle genuine gesture ghost ginger giraffe girl give glad glance glare glass glide glimpse globe gloom glory glove glow glue goat goddess gold good goose gorilla gospel gossip govern gown grab grace grain grant grape grasp grass gravity great green grid grief grit grocery group grow grunt guard guide guilt guitar gun guy habit hair half hamster hand happy harsh harvest hat have hawk hazard head health heart heavy hedgehog height hello helmet help hen hero hidden high hill hint hip hire history hobby hockey hold hole holiday hollow home honey hood hope horn hospital host hour hover hub huge human humble humor hundred hungry hunt hurdle hurry hurt husband hybrid ice icon ignore ill illegal image imitate immense immune impact impose improve impulse inbox income increase index indicate indoor industry infant inflict inform inhale inherit initial inject inner innocent input inquiry insane insect inside inspire install intact interest into invest invite involve iron island isolate issue item ivory jacket jaguar jar jazz jealous jelly jewel job join journey joy judge juice jump jungle junior junk just kangaroo keen keep ketchup key kick kidney kind kingdom kiss kit kitchen kite kitten kiwi knee knife knock know lab label lamp language laptop large later laugh laundry lava law lawn lawsuit layer lazy leader learn leave lecture left leg legal legend leisure lemon lend length lens leopard lesson letter level liar liberty library license life lift light like limb limit link lion liquid list little live lizard load loan lobster local lock logic lonely long loop lottery loud lounge love loyal lucky luggage lumber lunar lunch luxury lyrics machine mad magic magnet maid main major make mammal mango mansion manual maple marble march margin marine market marriage mask master match material math matrix maximum maze meadow mean medal media melody melt member memory mention menu mercy merge merit merry mesh message metal method middle midnight milk million mimic mind minimum minor miracle miss mixed mixture mobile model modify mom monitor monkey monster month moon moral more morning mosquito mother motion motor mountain mouse move movie much muffin mule multiply muscle museum mushroom music must mutual myself mystery naive name napkin narrow nasty natural nature near neck need negative neglect neither nephew nerve nest network news next nice night noble noise nominee noodle normal notable note nothing notice novel now nuclear number nurse nut oak obey object oblige obscure obtain ocean october odor off offer office often oil okay old omit once onion open opera oppose option orange orbit orchard order ordinary organ orient original orphan ostrich other outdoor outside oval over own oyster ozone packet page pair palace palm panda panel panic panther paper parade parent park parrot party pass patch path patrol pause pave payment peace peanut peasant pelican pen penalty pencil people pepper perfect permit person pet phone photo phrase physical piano picnic piece pig pigeon pill pilot pink pioneer pipe pistol pitch pizza place planet plastic plate play plaza pledge pluck plug plunge poem poet point polar pole police pond pony popular portion position possible post potato pottery poverty powder power practice praise predict prefer prepare present pretty prevent price pride primary print priority prison private prize problem process produce profit program project promote proof property prosper protect proud provide public pudding pull pulp pulse pumpkin punch pupil puppy purchase purity purpose push put puzzle pyramid quality quantum quarter question quick quit quiz quote rabbit raccoon race rack radar radio rage rail rain raise rally ramp ranch random range rapid rare rate rather raven reach ready real reason rebel rebuild recall receive recipe record recycle reduce reflect reform refuse region regret regular reject relax release relief rely remain remember remind remove render renew rent reopen repair repeat replace report require rescue resemble resist resource response result retire retreat return reunion reveal review reward rhythm ribbon rice rich ride rifle right rigid ring riot ripple risk ritual rival river road roast robot robust rocket romance roof rookie room rose rotate rough round route royal rubber rude rug rule run runway rural sad saddle sadness safe sail salad salmon salon salt salute same sample sand satisfy satoshi sauce sausage save say scale scan scare scatter scene scheme school science scissors scorpion scout scrap screen script scrub sea search season seat second secret section security seek segment select sell seminar senior sense sentence series service session settle setup seven shadow shaft shallow share shed shell sheriff shield shift shine ship shiver shock shoe shoot shop short shoulder shove shrimp shrug shuffle shy sibling siege sight sign silent silk silly silver similar simple since sing siren sister situate six size ski skill skin skirt skull slab slam sleep slender slice slide slight slim slogan slot slow slush small smart smile smoke smooth snack snake snap sniff snow soap soccer social sock soda soft solar solution solve someone song soon sorry sort soul sound soup source south space spare spatial spawn speak special speed sphere spice spider spike spin spirit split spoil sponsor spoon spray spread spring spy square squeeze squirrel stable stadium staff stage stairs stamp stand start state stay steak steel stem step stereo stick still sting stock stomach stone stop store storm story stove strategy street strike strong struggle student stuff stumble style subject submit subway success such sudden suffer sugar suggest suit summer sun sunny sunset super supply supreme sure surface surge surprise sustain swallow swamp swap swear sweet swift swim swing switch sword symbol symptom syrup table tackle tag tail talent tamper tank tape target task tattoo taxi teach team tell ten tenant tennis tent term test text thank that theme theory there they thing this thought three thrive throw thumb thunder ticket tilt timber time tiny tip tired title toast tobacco today together toilet token tomato tomorrow tone tongue tonight tool tooth top topic topple torch tornado tortoise toss total tourist toward tower town toy track trade traffic tragic train transfer trap trash travel tray treat tree trend trial tribe trick trigger trim trip trophy trouble truck truly trumpet trust truth tube tuition tumble tuna tunnel turkey turn turtle twelve twenty twice twin twist two type typical ugly umbrella unable unaware uncle uncover under undo unfair unfold unhappy uniform unique universe unknown unlock until unusual unwrap update upgrade uphold upon upper upset urban usage use used useful useless usual utility vacant vacuum vague valid valley valve van vanish vapor various vast vault vehicle velvet vendor venture venue verb verify version very veteran viable vibrant vicious victory video view village vintage violin virtual virus visa visit visual vital vivid vocal voice void volcano volume vote voyage wage wagon wait walk wall walnut want warfare warm warrior wash wasp waste water wave way wealth weapon wear weasel wedding weekend weird welcome well west wet whale wheat wheel when where whip whisper wide width wife wild will win window wine wing wink winner winter wire wisdom wise wish witness wolf woman wonder wood wool word world worry worth wrap wreck wrestle wrist write wrong yard year yellow you young youth zebra zero zone zoo'.split(' ');
+
+  function generate() {
+    const arr = crypto.getRandomValues(new Uint16Array(12));
+    return Array.from(arr).map(i => W[i % 2048]);
+  }
+
+  async function save(phrase, dekB64) {
+    const salt   = Crypto.newSalt();
+    const header = { kdf: 'PBKDF2-SHA256', version: 2, iterations: 600000, salt };
+    const rKek   = await Crypto.deriveKEK(phrase.join(' '), salt);
+    const aad    = Crypto.buildAAD(header, 'recovery');
+    const wrap   = await Crypto.encrypt(rKek, dekB64, aad);
+    const blobs  = await DB.get('crypto_blobs', 'blobs');
+    await DB.put('crypto_blobs', 'blobs', { ...blobs, recoverySalt: salt, recoveryWrap: wrap });
+  }
+
+  async function resetPassword(phrase, newPassword) {
+    const blobs = await DB.get('crypto_blobs', 'blobs');
+    if (!blobs?.recoveryWrap) throw new Error('No hay datos de recuperación');
+    const header = { kdf: 'PBKDF2-SHA256', version: 2, iterations: 600000, salt: blobs.recoverySalt };
+    const rKek   = await Crypto.deriveKEK(phrase.join(' '), blobs.recoverySalt);
+    let dekB64;
     try {
-      const vaultEnc = localStorage.getItem(this.VAULT_KEY);
-      const entries = vaultEnc ? await this.decrypt(oldKey, vaultEnc) : [];
-      const iterations = await calibrateKDF();
-      const salt = this._newSalt();
-      const header = { kdf: 'PBKDF2-SHA256', version: 3, iterations, salt };
-      const aadV = this._buildAAD(header, 'vault');
-      const aadD = this._buildAAD(header, 'dek');
-      const aadM = this._buildAAD(header, 'verifier');
-      const kek = await this.deriveKEK(password, salt, iterations);
-      const dekObj = await this.generateDEK();
-      const dekRaw = await this.exportDEK(dekObj);
-      const dekB64 = btoa(String.fromCharCode(...dekRaw));
-      const newDekEnc   = await this._encrypt(kek, dekB64, aadD);
-      const newVaultEnc = await this._encrypt(dekObj, entries, aadV);
-      const newVerifier = await this._encrypt(kek, { ok: true, v: 3 }, aadM);
-      // Staging
-      localStorage.setItem(ST, JSON.stringify({ dek: newDekEnc, vault: newVaultEnc, verifier: newVerifier, kdf: header }));
-      // Validar staging
-      const st = JSON.parse(localStorage.getItem(ST));
-      const stAadD = this._buildAAD(st.kdf, 'dek');
-      const stAadV = this._buildAAD(st.kdf, 'vault');
-      const stAadM = this._buildAAD(st.kdf, 'verifier');
-      const tDekB64 = await this._decrypt(kek, st.dek, stAadD);
-      const tDek = await this.importDEK(Uint8Array.from(atob(tDekB64), c => c.charCodeAt(0)));
-      const tVault = await this._decrypt(tDek, st.vault, stAadV);
-      const tMeta = await this._decrypt(kek, st.verifier, stAadM);
-      if (!Array.isArray(tVault) || !tMeta?.ok) throw new Error('Staging inválido');
-      // Promover
-      this._saveKDFHeader(header);
-      localStorage.setItem(this.DEK_KEY, newDekEnc);
-      localStorage.setItem(this.VAULT_KEY, newVaultEnc);
-      localStorage.setItem(this.META_KEY, newVerifier);
-      localStorage.removeItem('hades_salt');
-      localStorage.removeItem(ST);
-      // [HADES] Migración v3 completada
-      return dekObj;
-    } catch(err) {
-      localStorage.removeItem(ST);
-      // [HADES] Migración fallida — rollback silencioso
-      // Retornar null: el llamador (verifyPassword) manejará el error
-      // No retornar oldKey (KEK) porque State.cryptoKey espera DEK en v3
-      return null;
+      dekB64 = await Crypto.decrypt(rKek, blobs.recoveryWrap, Crypto.buildAAD(header, 'recovery'));
+    } catch { throw new Error('Frase de recuperación incorrecta'); }
+    const dek       = await Crypto.importDEK(dekB64);
+    const kdfHeader = await DB.get('kdf_header', 'header');
+    const newSalt   = Crypto.newSalt();
+    const newHeader = { ...kdfHeader, salt: newSalt };
+    const newKek    = await Crypto.deriveKEK(newPassword, newSalt);
+    const newAadDek = Crypto.buildAAD(newHeader, 'dek');
+    const newAadVer = Crypto.buildAAD(newHeader, 'verifier');
+    const newDekEnc = await Crypto.encrypt(newKek, dekB64, newAadDek);
+    const newVerEnc = await Crypto.encrypt(newKek, { ok: true, v: 2, user: blobs.user || 'Usuario' }, newAadVer);
+    const newBlobs  = { ...blobs, dekEnc: newDekEnc, verifierEnc: newVerEnc };
+    await DB.atomicWrite([
+      { store: 'kdf_header',   type: 'put', key: 'header', value: newHeader },
+      { store: 'crypto_blobs', type: 'put', key: 'blobs',  value: newBlobs  },
+    ]);
+    return dek;
+  }
+
+  function renderPhrase(words, containerId) {
+    const c = document.getElementById(containerId);
+    if (!c) return;
+    c.innerHTML = '';
+    words.forEach((word, i) => {
+      const el = document.createElement('div');
+      el.className = 'phrase-word';
+      el.innerHTML = `<span class="phrase-num">${i + 1}</span><span class="phrase-text">${word}</span>`;
+      c.appendChild(el);
+    });
+  }
+
+  function buildRecoveryInputs(containerId) {
+    const c = document.getElementById(containerId);
+    if (!c) return;
+    c.innerHTML = '';
+    for (let i = 0; i < 12; i++) {
+      const wrap = document.createElement('div');
+      wrap.className = 'recovery-word-wrap';
+      wrap.innerHTML = `<span>${i + 1}</span><input type="text" data-idx="${i}" autocomplete="off" autocorrect="off" spellcheck="false" />`;
+      c.appendChild(wrap);
     }
   }
 
-};
+  function getRecoveryWords(containerId) {
+    return Array.from(document.querySelectorAll(`#${containerId} input`)).map(i => i.value.trim().toLowerCase());
+  }
 
-// ── BIOMETRIC ENGINE ──────────────────────────────────
-const Biometric = {
-  // ── Helpers ──
-  isSupported() {
-    return window.PublicKeyCredential !== undefined &&
-           typeof navigator.credentials?.create === 'function';
-  },
-  getMode() { return localStorage.getItem('hades_biometric_mode') || 'off'; },
-  setMode(mode) { localStorage.setItem('hades_biometric_mode', mode); },
-  getCredentialId() { return localStorage.getItem(Crypto.BIOMETRIC_KEY); },
-  saveCredentialId(id) { localStorage.setItem(Crypto.BIOMETRIC_KEY, id); },
-  clearAll() {
-    // Limpiar todos los materiales biométricos incluyendo KDF salt
-    ['hades_biometric_pw', 'hades_biometric_mode', 'hades_bio_kdf_salt'].forEach(k =>
-      localStorage.removeItem(k)
-    );
-    localStorage.removeItem(Crypto.BIOMETRIC_KEY);
-  },
-  bufToB64(buf) { return btoa(String.fromCharCode(...new Uint8Array(buf))); },
-  b64ToBuf(b64) { return Uint8Array.from(atob(b64), c => c.charCodeAt(0)); },
+  return { generate, save, resetPassword, renderPhrase, buildRecoveryInputs, getRecoveryWords };
+})();
 
-  // ── Cifra la contraseña maestra con AES usando el credentialId como semilla ──
-  // ── Cifrado biométrico: PBKDF2-SHA256 600k iters + salt aleatoria persistida ──
-  async encryptPassword(password, credentialId) {
-    const enc = new TextEncoder();
-    // Salt aleatoria persistida para cifrado biométrico (no reutilizar)
-    let bioSaltB64 = localStorage.getItem('hades_bio_kdf_salt');
-    if (!bioSaltB64) {
-      const raw = crypto.getRandomValues(new Uint8Array(32));
-      bioSaltB64 = btoa(String.fromCharCode(...raw));
-      localStorage.setItem('hades_bio_kdf_salt', bioSaltB64);
-    }
-    const salt = Uint8Array.from(atob(bioSaltB64), c => c.charCodeAt(0));
-    const keyMaterial = await crypto.subtle.importKey(
-      'raw', enc.encode(credentialId), 'PBKDF2', false, ['deriveKey']
-    );
-    const key = await crypto.subtle.deriveKey(
-      { name: 'PBKDF2', salt, iterations: 600000, hash: 'SHA-256' },
-      keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt']
-    );
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const buf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(password));
-    const combined = new Uint8Array(12 + buf.byteLength);
-    combined.set(iv);
-    combined.set(new Uint8Array(buf), 12);
-    return btoa(String.fromCharCode(...combined));
-  },
+// ─────────────────────────────────────────────
+// HADES-V2-BIOMETRIC: WebAuthn Module
+// ─────────────────────────────────────────────
+const Biometric = (() => {
+  const RP_ID   = location.hostname;
+  const RP_NAME = 'Hades V2';
 
-  // ── Descifrado biométrico ──
-  async decryptPassword(encrypted, credentialId) {
-    const enc = new TextEncoder();
-    const bioSaltB64 = localStorage.getItem('hades_bio_kdf_salt');
-    if (!bioSaltB64) throw new Error('Bio KDF salt not found');
-    const salt = Uint8Array.from(atob(bioSaltB64), c => c.charCodeAt(0));
-    const keyMaterial = await crypto.subtle.importKey(
-      'raw', enc.encode(credentialId), 'PBKDF2', false, ['deriveKey']
-    );
-    const key = await crypto.subtle.deriveKey(
-      { name: 'PBKDF2', salt, iterations: 600000, hash: 'SHA-256' },
-      keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
-    );
-    const raw = Uint8Array.from(atob(encrypted), c => c.charCodeAt(0));
-    const iv = raw.slice(0, 12);
-    const data = raw.slice(12);
-    const buf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data);
-    return new TextDecoder().decode(buf);
-  },
+  function isSupported() { return !!(window.PublicKeyCredential && navigator.credentials); }
+  function getMode() { return localStorage.getItem('hades_bio_mode') || 'off'; }
+  function setMode(m) { localStorage.setItem('hades_bio_mode', m); }
 
-  // ── Guardar contraseña maestra cifrada para acceso biométrico ──
-  async savePassword(password) {
-    const credId = this.getCredentialId();
-    if (!credId) throw new Error('No hay credencial registrada');
-    const encrypted = await this.encryptPassword(password, credId);
-    localStorage.setItem('hades_biometric_pw', encrypted);
-  },
+  async function hasCredential() {
+    const blobs = await DB.get('crypto_blobs', 'blobs');
+    return !!(blobs?.bioCredentialId);
+  }
 
-  // ── Registrar huella y guardar contraseña cifrada ──
-  async register(password) {
-    if (!this.isSupported()) throw new Error('WebAuthn no soportado');
+  async function register(dek, kek) {
+    if (!isSupported()) throw new Error('WebAuthn no disponible en este dispositivo');
+    const userId    = crypto.getRandomValues(new Uint8Array(16));
     const challenge = crypto.getRandomValues(new Uint8Array(32));
     const credential = await navigator.credentials.create({
       publicKey: {
+        rp: { id: RP_ID, name: RP_NAME },
+        user: { id: userId, name: 'hades-user', displayName: 'Hades User' },
         challenge,
-        rp: { name: 'Hades', id: location.hostname },
-        user: {
-          id: crypto.getRandomValues(new Uint8Array(16)),
-          name: 'hades-user',
-          displayName: 'Hades User'
-        },
-        pubKeyCredParams: [
-          { type: 'public-key', alg: -7 },
-          { type: 'public-key', alg: -257 }
-        ],
-        authenticatorSelection: {
-          authenticatorAttachment: 'platform',
-          userVerification: 'required',
-          residentKey: 'preferred'
-        },
-        timeout: 60000
-      }
-    });
-    const credId = this.bufToB64(credential.rawId);
-    this.saveCredentialId(credId);
-    // Cifrar y guardar la contraseña maestra
-    const encrypted = await this.encryptPassword(password, credId);
-    localStorage.setItem('hades_biometric_pw', encrypted);
-    return true;
-  },
-
-  // ── Verificar huella y obtener la contraseña maestra descifrada ──
-  async verifyAndGetPassword() {
-    if (!this.isSupported()) throw new Error('WebAuthn no soportado');
-    const credId = this.getCredentialId();
-    if (!credId) throw new Error('No hay credencial registrada');
-    const encrypted = localStorage.getItem('hades_biometric_pw');
-    if (!encrypted) throw new Error('No hay contraseña guardada');
-    const challenge = crypto.getRandomValues(new Uint8Array(32));
-    const options = {
-      publicKey: {
-        challenge,
-        userVerification: 'required',
+        pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
         timeout: 60000,
-        allowCredentials: [{
-          type: 'public-key',
-          id: this.b64ToBuf(credId),
-          transports: ['internal']
-        }]
+        authenticatorSelection: { userVerification: 'required', residentKey: 'preferred' },
+        attestation: 'none'
       }
-    };
-    const assertion = await navigator.credentials.get(options);
-    if (!assertion) throw new Error('Verificación fallida');
-    // Descifrar la contraseña con el credentialId
-    const password = await this.decryptPassword(encrypted, credId);
-    return password;
-  }
-};
-// ── RECOVERY PHRASE ENGINE ───────────────────────────
-const RECOVERY_WORDS = [
-  'árbol','banco','brazo','campo','carta','cielo','clase','clave','corte','cueva',
-  'datos','deber','delta','denso','dicha','dulce','earth','enero','fábri','fácil',
-  'falda','fecha','finca','firma','flota','flujo','forma','fruta','fuego','fuerza',
-  'ganas','globo','golpe','grano','grupo','gusto','habla','había','hielo','hierba',
-  'hijos','honor','hotel','hueso','huevo','ideas','igual','imagen','inicio','joven',
-  'juego','junto','largo','leche','letra','libro','línea','llave','lluvia','local',
-  'logro','lucha','lugar','madre','manga','manos','marca','marea','media','mejor',
-  'menos','mente','mesón','metas','miedo','monte','mundo','músic','nieve','nivel',
-  'noble','noche','norma','norte','novia','nueva','nunca','obras','orden','orgen',
-  'otros','padre','papel','parce','parqu','pasos','patri','peace','perro','pesos',
-  'piedra','pista','plano','plaza','pluma','poder','pompa','preci','prima','publi',
-  'punto','queda','quien','razón','rebos','reino','reloj','resto','river','robot',
-  'rocas','ruido','rumbo','salud','salvo','sangr','sauce','selva','señal','seria',
-  'siete','siglo','signo','silba','silla','sitio','sobre','solar','solid','sombr',
-  'suelo','sueño','surco','tabla','tarea','tarde','techo','tejid','temas','tener',
-  'texto','tiempo','timón','tinta','título','todas','tomar','topes','torre','total',
-  'tramo','trato','trigo','tropa','tunel','turno','única','unión','unity','vacío',
-  'valor','vapor','verde','vibra','viaje','video','villa','viola','vista','voces',
-  'vuelo','world','yerba','zones'
-];
-
-const Recovery = {
-  generate() {
-    const words = [];
-    const arr = new Uint32Array(12);
-    crypto.getRandomValues(arr);
-    arr.forEach(n => words.push(RECOVERY_WORDS[n % RECOVERY_WORDS.length]));
-    return words;
-  },
-  renderPhrase(words, containerId) {
-    const container = $(containerId);
-    if (!container) return;
-    container.innerHTML = ''; // Limpiar primero
-    words.forEach((w, i) => {
-      const div = document.createElement('div');
-      div.className = 'recovery-word';
-      const num = document.createElement('span');
-      num.className = 'recovery-word-num';
-      num.textContent = `${i + 1}.`;
-      const word = document.createElement('span');
-      word.className = 'recovery-word-text';
-      word.textContent = w; // textContent — las palabras son del generador interno
-      div.appendChild(num);
-      div.appendChild(word);
-      container.appendChild(div);
     });
-  },
-  renderInputs(containerId) {
-    const container = $(containerId);
-    if (!container) return;
-    container.innerHTML = '';
-    Array.from({length: 12}, (_, i) => {
-      const input = document.createElement('input');
-      input.type = 'text';
-      input.placeholder = `Palabra ${i + 1}`;
-      input.dataset.idx = i;
-      input.autocomplete = 'off';
-      input.setAttribute('autocorrect', 'off');
-      input.setAttribute('autocapitalize', 'off');
-      input.setAttribute('spellcheck', 'false');
-      container.appendChild(input);
-    });
-  },
-  getInputWords(containerId) {
-    const inputs = $(containerId)?.querySelectorAll('input');
-    return Array.from(inputs || []).map(i => i.value.trim().toLowerCase());
+    const credId  = btoa(String.fromCharCode(...new Uint8Array(credential.rawId)));
+    const header  = await DB.get('kdf_header', 'header');
+    const dekB64  = await Crypto.exportDEK(dek);
+    const aadBio  = Crypto.buildAAD(header, 'bio');
+    const bioWrap = await Crypto.encrypt(kek, dekB64, aadBio);
+    const blobs   = await DB.get('crypto_blobs', 'blobs');
+    await DB.put('crypto_blobs', 'blobs', { ...blobs, bioCredentialId: credId, bioWrap });
+    setMode('both');
   }
-};
 
-// ══════════════════════════════════════════════════════
-// HADES-REAUTH — ReauthManager
-// Capa centralizada de reautenticación para acciones sensibles.
-// Ventana de validez: 120 segundos.
-// Expiración forzada tras eventos de alto riesgo.
-// ══════════════════════════════════════════════════════
-const ReauthManager = {
-  WINDOW_MS: 120_000, // 120 segundos
-  _lastReauth: null,  // timestamp de la última reauth exitosa
+  async function authenticate(kek) {
+    if (!isSupported()) throw new Error('WebAuthn no disponible');
+    const blobs = await DB.get('crypto_blobs', 'blobs');
+    if (!blobs?.bioCredentialId) throw new Error('Sin credencial biométrica registrada');
+    const credId    = Uint8Array.from(atob(blobs.bioCredentialId), c => c.charCodeAt(0));
+    const challenge = crypto.getRandomValues(new Uint8Array(32));
+    await navigator.credentials.get({
+      publicKey: {
+        rpId: RP_ID, challenge,
+        allowCredentials: [{ id: credId, type: 'public-key' }],
+        userVerification: 'required', timeout: 60000
+      }
+    });
+    const header = await DB.get('kdf_header', 'header');
+    const aadBio = Crypto.buildAAD(header, 'bio');
+    const dekB64 = await Crypto.decrypt(kek, blobs.bioWrap, aadBio);
+    return Crypto.importDEK(dekB64);
+  }
 
-  // ── ¿La reauth está vigente? ──
-  isRecent() {
-    if (!this._lastReauth) return false;
-    return (Date.now() - this._lastReauth) < this.WINDOW_MS;
-  },
+  async function unregister() {
+    const blobs = await DB.get('crypto_blobs', 'blobs');
+    if (!blobs) return;
+    const { bioCredentialId, bioWrap, ...rest } = blobs;
+    await DB.put('crypto_blobs', 'blobs', rest);
+    setMode('off');
+  }
 
-  // ── Registrar reauth exitosa ──
-  stamp() {
-    this._lastReauth = Date.now();
-  },
+  return { isSupported, getMode, setMode, hasCredential, register, authenticate, unregister };
+})();
 
-  // ── Forzar reauth en el próximo intento (eventos de alto riesgo) ──
-  // HADES-REAUTH: llamar tras import, recovery, cambio de método, reenrol biométrico
-  invalidate() {
-    this._lastReauth = null;
-  },
+// ─────────────────────────────────────────────
+// HADES-V2-REAUTH: Re-authentication Module
+// ─────────────────────────────────────────────
+const Reauth = (() => {
+  const WINDOW = 120_000;
+  let _ts = null;
 
-  // ── Punto de entrada principal ──
-  // actionLabel: string descriptivo para el modal (no expone detalles internos)
-  // Retorna true si reauth exitosa, false si cancelada o fallida.
-  async require(actionLabel = 'esta acción') {
-    if (this.isRecent()) return true; // Reauth vigente — no molestar
+  function isValid() { return _ts !== null && (Date.now() - _ts) < WINDOW; }
+  function confirm() { _ts = Date.now(); }
+  function invalidate() { _ts = null; }
 
-    const mode = Biometric.getMode();
-    const hasCredential = !!Biometric.getCredentialId();
-    const usesBiometric = (mode === 'biometric' || mode === 'both') && hasCredential && Biometric.isSupported();
-
+  async function require(actionLabel) {
+    if (isValid()) return true;
     return new Promise(resolve => {
-      // ── Construir modal de reauth via DOM API (HADES-REAUTH) ──
-      const overlay = document.createElement('div');
-      overlay.className = 'modal-overlay reauth-overlay';
-
-      const card = document.createElement('div');
-      card.className = 'glass-card modal-card small';
-
-      // Header
-      const header = document.createElement('div');
-      header.className = 'modal-header';
-      const title = document.createElement('h2');
-      title.textContent = 'Verificar identidad';
-      const closeBtn = document.createElement('button');
-      closeBtn.className = 'icon-btn';
-      closeBtn.title = 'Cancelar';
-      const closeSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      closeSvg.setAttribute('viewBox', '0 0 24 24');
-      closeSvg.innerHTML = '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>';
-      closeBtn.appendChild(closeSvg);
-      header.appendChild(title);
-      header.appendChild(closeBtn);
-
-      // Body
-      const body = document.createElement('div');
-      body.className = 'modal-body';
-
-      const hint = document.createElement('p');
-      hint.className = 'form-hint';
-      hint.textContent = `Para ${actionLabel} debes verificar tu identidad.`;
-      body.appendChild(hint);
-
-      const errEl = document.createElement('p');
-      errEl.className = 'error-msg hidden';
-      body.appendChild(errEl);
-
-      // Campo contraseña (siempre visible excepto en modo solo-huella)
-      let pwInput = null;
-      if (mode !== 'biometric') {
-        const fg = document.createElement('div');
-        fg.className = 'field-group';
-        const lbl = document.createElement('label');
-        lbl.textContent = 'Contraseña maestra';
-        const iw = document.createElement('div');
-        iw.className = 'glass-input-wrap';
-        pwInput = document.createElement('input');
-        pwInput.type = 'password';
-        pwInput.placeholder = '••••••••';
-        pwInput.autocomplete = 'current-password';
-        iw.appendChild(pwInput);
-        fg.appendChild(lbl);
-        fg.appendChild(iw);
-        body.appendChild(fg);
-      }
-
-      // Footer
-      const footer = document.createElement('div');
-      footer.className = 'modal-footer';
-      footer.style.flexDirection = 'column';
-      footer.style.gap = '8px';
-
-      const cancelBtn = document.createElement('button');
-      cancelBtn.className = 'btn-ghost';
-      cancelBtn.textContent = 'Cancelar';
-
-      // Botón biométrico si aplica
-      if (usesBiometric) {
-        const bioBtn = document.createElement('button');
-        bioBtn.className = 'btn-biometric';
-        const bioSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        bioSvg.setAttribute('viewBox', '0 0 24 24');
-        bioSvg.innerHTML = '<path d="M12 2a10 10 0 0 1 10 10"/><path d="M12 6a6 6 0 0 1 6 6"/><path d="M12 10a2 2 0 0 1 2 2"/><path d="M2 12a10 10 0 0 0 10 10"/><path d="M6 12a6 6 0 0 0 6 6"/><path d="M10 12a2 2 0 0 0 2 2"/>';
-        const bioSpan = document.createElement('span');
-        bioSpan.textContent = mode === 'both' ? 'Verificar huella primero' : 'Usar huella dactilar';
-        bioBtn.appendChild(bioSvg);
-        bioBtn.appendChild(bioSpan);
-
-        bioBtn.addEventListener('click', async () => {
-          bioBtn.classList.add('scanning');
-          bioBtn.disabled = true;
-          errEl.classList.add('hidden');
-          try {
-            const pw = await Biometric.verifyAndGetPassword();
-            if (mode === 'biometric') {
-              // Solo huella — verificar contra vault como prueba real
-              const key = await Crypto.verifyPassword(pw);
-              if (!key) throw new Error('Verificación fallida');
-              this.stamp();
-              cleanup();
-              resolve(true);
-            } else {
-              // Modo both — huella OK, ahora pedir contraseña
-              bioBtn.classList.remove('scanning');
-              bioBtn.disabled = true;
-              bioBtn.style.opacity = '0.5';
-              bioSpan.textContent = 'Huella verificada ✓';
-              if (pwInput) {
-                pwInput.closest('.field-group').style.borderColor = 'var(--accent)';
-                pwInput.focus();
-                // Marcar que huella ya pasó
-                pwInput.dataset.bioVerified = 'true';
-              }
-            }
-          } catch(e) {
-            bioBtn.classList.remove('scanning');
-            bioBtn.disabled = false;
-            errEl.textContent = e.name === 'NotAllowedError' ? 'Verificación cancelada' : 'Error biométrico';
-            errEl.classList.remove('hidden');
-          }
-        });
-        footer.appendChild(bioBtn);
-      }
-
-      // Botón confirmar (contraseña)
-      if (mode !== 'biometric') {
-        const confirmBtn = document.createElement('button');
-        confirmBtn.className = 'btn-primary';
-        confirmBtn.textContent = 'Verificar';
-
-        const verify = async () => {
-          if (!pwInput) return;
-          const pw = pwInput.value;
-          if (!pw) { errEl.textContent = 'Ingresa tu contraseña'; errEl.classList.remove('hidden'); return; }
-          // Modo both: exigir que huella haya pasado primero
-          if (mode === 'both' && pwInput.dataset.bioVerified !== 'true') {
-            errEl.textContent = 'Verifica tu huella primero'; errEl.classList.remove('hidden'); return;
-          }
-          confirmBtn.disabled = true;
-          confirmBtn.textContent = 'Verificando…';
-          errEl.classList.add('hidden');
-          // HADES-REAUTH: verificar contraseña sin exponer clave en estado global
-          const key = await Crypto.verifyPassword(pw);
-          if (!key) {
-            confirmBtn.disabled = false;
-            confirmBtn.textContent = 'Verificar';
-            errEl.textContent = 'Contraseña incorrecta';
-            errEl.classList.remove('hidden');
-            pwInput.value = '';
-            pwInput.focus();
-            return;
-          }
-          // Limpiar contraseña de memoria inmediatamente
-          pwInput.value = '';
-          this.stamp();
-          cleanup();
-          resolve(true);
-        };
-
-        confirmBtn.addEventListener('click', verify);
-        if (pwInput) pwInput.addEventListener('keydown', e => { if (e.key === 'Enter') verify(); });
-        footer.appendChild(confirmBtn);
-      }
-
-      footer.appendChild(cancelBtn);
-
-      // Cancelar → abort total
-      const abort = () => { cleanup(); resolve(false); };
-      closeBtn.addEventListener('click', abort);
-      cancelBtn.addEventListener('click', abort);
-      overlay.addEventListener('click', e => { if (e.target === overlay) abort(); });
-
-      card.appendChild(header);
-      card.appendChild(body);
-      card.appendChild(footer);
-      overlay.appendChild(card);
-      document.body.appendChild(overlay);
-      if (pwInput) setTimeout(() => pwInput.focus(), 80);
-
-      function cleanup() {
-        if (pwInput) pwInput.value = ''; // Limpiar contraseña de DOM
-        overlay.remove();
-      }
+      State.reauthResolve = resolve;
+      UI.showReauth(actionLabel);
     });
   }
-};
 
-// ── APP STATE ─────────────────────────────────────────
+  return { isValid, confirm, invalidate, require };
+})();
+
+// ─────────────────────────────────────────────
+// HADES-V2-BACKUP: Import / Export Module
+// ─────────────────────────────────────────────
+const Backup = (() => {
+  async function checksum(str) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  async function exportVault() {
+    const ok = await Reauth.require('exportar backup');
+    if (!ok) return;
+    const header   = await DB.get('kdf_header', 'header');
+    const blobs    = await DB.get('crypto_blobs', 'blobs');
+    const vaultEnc = await DB.get('vault', 'data');
+    if (!header || !blobs || !vaultEnc) { UI.toast('No hay bóveda para exportar', 'error'); return; }
+    const cs = await checksum(JSON.stringify(vaultEnc));
+    const backup = { format: 'hades-backup', version: 2, created_at: new Date().toISOString(), kdf_header: header, crypto_blobs: blobs, vault_enc: vaultEnc, checksum: cs };
+    const blob = new Blob([JSON.stringify(backup)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = `hades-backup-${Date.now()}.hades`; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    UI.toast('Backup exportado correctamente', 'success');
+  }
+
+  async function loadFile(file) {
+    if (file.size > 512 * 1024) throw new Error('Archivo demasiado grande (máximo 512KB)');
+    let data;
+    try { data = JSON.parse(await file.text()); } catch { throw new Error('JSON inválido'); }
+    if (data.format !== 'hades-backup') throw new Error('Formato no reconocido');
+    if (data.version !== 2) throw new Error('Versión de backup incompatible');
+    if (!data.kdf_header || !data.crypto_blobs || !data.vault_enc) throw new Error('Backup incompleto');
+    const cs = await checksum(JSON.stringify(data.vault_enc));
+    if (cs !== data.checksum) throw new Error('Checksum inválido — backup corrupto o modificado');
+    await DB.put('import_staging', 'data', data);
+    return data;
+  }
+
+  async function promoteImport(password) {
+    const data = await DB.get('import_staging', 'data');
+    if (!data) throw new Error('No hay backup en staging');
+    const kek = await Crypto.deriveKEK(password, data.kdf_header.salt);
+    const aadVer = Crypto.buildAAD(data.kdf_header, 'verifier');
+    try {
+      const ver = await Crypto.decrypt(kek, data.crypto_blobs.verifierEnc, aadVer);
+      if (!ver?.ok) throw new Error('Verificación fallida');
+    } catch { throw new Error('Contraseña incorrecta para este backup'); }
+    await DB.snapshot();
+    try {
+      await DB.atomicWrite([
+        { store: 'kdf_header',   type: 'put', key: 'header', value: data.kdf_header   },
+        { store: 'crypto_blobs', type: 'put', key: 'blobs',  value: data.crypto_blobs },
+        { store: 'vault',        type: 'put', key: 'data',   value: data.vault_enc    },
+      ]);
+    } catch (e) {
+      await DB.rollback();
+      throw new Error('Error al importar — estado anterior restaurado');
+    }
+    await DB.clear('import_staging');
+    await DB.del('staging', 'snap');
+  }
+
+  return { exportVault, loadFile, promoteImport };
+})();
+
+// ─────────────────────────────────────────────
+// HADES-V2-STATE: Application State
+// ─────────────────────────────────────────────
 const State = {
-  cryptoKey: null,
+  dek: null,
+  kek: null,
+  dekB64: null,
+  user: '',
   entries: [],
-  editingId: null,
-  currentView: 'vault',
+  failedAttempts: 0,
+  MAX_ATTEMPTS: 3,
+  _lockTimer: null,
+  _pendingPhrase: null,
+  _pendingDekB64: null,
+  reauthResolve: null,
+  _importData: null,
+  currentEditId: null,
   currentCat: 'all',
-  autoLockTimer: null,
-  autoLockSeconds: 300,
-  theme: 'dark',
-  _bioVerified: false,
 };
-// ── DOM HELPERS ───────────────────────────────────────
-const $ = id => document.getElementById(id);
-const on = (el, ev, fn) => el && el.addEventListener(ev, fn);
-function showToast(msg, duration = 2200) {
-  const t = $('toast');
-  t.textContent = msg;
-  t.classList.remove('hidden');
-  void t.offsetWidth;
-  t.classList.add('show');
-  clearTimeout(showToast._timer);
-  showToast._timer = setTimeout(() => {
-    t.classList.remove('show');
-    setTimeout(() => t.classList.add('hidden'), 300);
-  }, duration);
-}
-function showConfirm(title, msg) {
-  return new Promise(resolve => {
-    $('confirm-title').textContent = title;
-    $('confirm-msg').textContent = msg;
-    $('modal-confirm').classList.remove('hidden');
-    const ok = $('confirm-ok');
-    const cancel = $('confirm-cancel');
-    const cleanup = (val) => {
-      $('modal-confirm').classList.add('hidden');
-      ok.replaceWith(ok.cloneNode(true));
-      cancel.replaceWith(cancel.cloneNode(true));
-      resolve(val);
-    };
-    on($('confirm-ok'), 'click', () => cleanup(true));
-    on($('confirm-cancel'), 'click', () => cleanup(false));
-  });
-}
-// ── THEME ─────────────────────────────────────────────
-function applyTheme(theme) {
-  State.theme = theme;
-  document.body.classList.toggle('theme-dark', theme === 'dark');
-  document.body.classList.toggle('theme-light', theme === 'light');
-  localStorage.setItem('hades_theme', theme);
-  $('theme-light-btn')?.classList.toggle('active', theme === 'light');
-  $('theme-dark-btn')?.classList.toggle('active', theme === 'dark');
-}
-function toggleTheme() {
-  applyTheme(State.theme === 'dark' ? 'light' : 'dark');
-}
-// ── AUTO LOCK ─────────────────────────────────────────
-function resetAutoLock() {
-  if (!State.autoLockSeconds) return;
-  clearTimeout(State.autoLockTimer);
-  State.autoLockTimer = setTimeout(lockApp, State.autoLockSeconds * 1000);
-}
-function lockApp() {
-  State.cryptoKey = null;
-  State.entries = [];
-  clearTimeout(State.autoLockTimer);
-  ReauthManager.invalidate(); // Invalidar reauth al bloquear sesión
-  $('page-app').classList.add('hidden');
-  $('page-home').classList.add('hidden');
-  $('page-unlock').classList.remove('hidden');
-  document.body.dataset.page = 'unlock';
-  $('mp-enter')?.focus();
-}
-// ── UNLOCK SCREEN ─────────────────────────────────────
-async function initUnlockScreen() {
-  const hasVault = Crypto.hasVault();
-  $('unlock-first-time').classList.toggle('hidden', hasVault);
-  $('unlock-existing').classList.toggle('hidden', !hasVault);
-  $('unlock-recovery').classList.add('hidden');
-  $('unlock-new-password').classList.add('hidden');
 
-  // Mostrar nombre del usuario en unlock y home
-  const user = Crypto.getUser();
-  if (user) {
-    const name = user.name || 'Usuario';
-    if ($('unlock-username')) $('unlock-username').textContent = name;
-    if ($('home-username')) $('home-username').textContent = name;
+// ─────────────────────────────────────────────
+// HADES-V2-UI: UI Utilities
+// ─────────────────────────────────────────────
+const UI = (() => {
+  function $(id) { return document.getElementById(id); }
+  function show(id)  { const e = $(id); if (e) e.classList.remove('hidden'); }
+  function hide(id)  { const e = $(id); if (e) e.classList.add('hidden'); }
+
+  function setPage(page) {
+    document.querySelectorAll('.page').forEach(p => p.classList.toggle('hidden', p.id !== `page-${page}`));
+    document.body.dataset.page = page;
   }
 
-  if (!hasVault) {
-    // ── PASO 1: Datos personales ──
-    on($('mp-new'), 'input', () => {
-      const pw = $('mp-new').value;
-      const s = passwordStrength(pw);
-      $('strength-wrap').classList.toggle('hidden', pw.length === 0);
-      updateStrengthUI('strength-fill', 'strength-label', s);
+  function setState(stateId) {
+    ['state-loading','state-setup-1','state-setup-2','state-setup-3','state-login','state-recovery','state-new-password']
+      .forEach(s => { const e = $(s); if (e) e.classList.toggle('hidden', s !== stateId); });
+  }
+
+  function setView(view) {
+    document.querySelectorAll('.view').forEach(v => {
+      const isActive = v.id === `view-${view}`;
+      v.classList.toggle('active', isActive);
+      v.classList.toggle('hidden', !isActive);
+    });
+    document.querySelectorAll('.nav-item[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view));
+    const titles = { vault: 'Bóveda', generator: 'Generador', settings: 'Ajustes', help: 'Ayuda' };
+    const el = $('view-title'); if (el) el.textContent = titles[view] || view;
+  }
+
+  function showModal(id)  { const m = $(id); if (m) { m.classList.remove('hidden'); } }
+  function hideModal(id)  { const m = $(id); if (m) { m.classList.add('hidden'); } }
+
+  function showReauth(label) {
+    const el = $('reauth-action-msg');
+    if (el) el.textContent = `Verificación requerida para: ${label}`;
+    hide('reauth-error');
+    const inp = $('reauth-password'); if (inp) inp.value = '';
+    showModal('modal-reauth');
+    setTimeout(() => { if (inp) inp.focus(); }, 100);
+  }
+
+  let _toastTimer = null;
+  function toast(msg, type = '') {
+    const t = $('toast');
+    if (!t) return;
+    t.textContent = msg;
+    t.className = `toast${type ? ' ' + type : ''}`;
+    t.classList.remove('hidden');
+    clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => t.classList.add('hidden'), 3000);
+  }
+
+  function err(id, msg) {
+    const el = $(id);
+    if (!el) return;
+    if (msg) { el.textContent = msg; el.classList.remove('hidden'); }
+    else el.classList.add('hidden');
+  }
+
+  function eyeToggle(targetId) {
+    const inp = $(targetId);
+    if (!inp) return;
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+  }
+
+  function passwordStrength(pwd) {
+    if (!pwd) return { pct: 0, label: '', color: '' };
+    let score = 0;
+    if (pwd.length >= 8)  score++;
+    if (pwd.length >= 12) score++;
+    if (pwd.length >= 16) score++;
+    if (/[A-Z]/.test(pwd)) score++;
+    if (/[a-z]/.test(pwd)) score++;
+    if (/[0-9]/.test(pwd)) score++;
+    if (/[^A-Za-z0-9]/.test(pwd)) score++;
+    const levels = [
+      { pct: 0,   label: '',           color: '' },
+      { pct: 15,  label: 'Muy débil',  color: '#f87171' },
+      { pct: 30,  label: 'Débil',      color: '#fb923c' },
+      { pct: 50,  label: 'Regular',    color: '#fbbf24' },
+      { pct: 70,  label: 'Buena',      color: '#34d399' },
+      { pct: 85,  label: 'Fuerte',     color: '#34d399' },
+      { pct: 100, label: 'Muy fuerte', color: '#6ee7b7' },
+    ];
+    return levels[Math.min(score, 6)];
+  }
+
+  function updateStrength(pwdId, fillId, labelId, wrapId) {
+    const pwd  = $(pwdId)?.value || '';
+    const s    = passwordStrength(pwd);
+    const fill = $(fillId);
+    const lbl  = $(labelId);
+    const wrap = $(wrapId);
+    if (!fill || !lbl) return;
+    if (pwd.length === 0) { if (wrap) wrap.classList.add('hidden'); return; }
+    if (wrap) wrap.classList.remove('hidden');
+    fill.style.width = s.pct + '%';
+    fill.style.background = s.color;
+    lbl.textContent = s.label;
+  }
+
+  function clearClipboardAfter(ms = 30000) {
+    setTimeout(() => {
+      try { navigator.clipboard.writeText(''); } catch {}
+    }, ms);
+  }
+
+  async function copyToClipboard(text, label = 'Copiado') {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(`${label} copiado`, 'success');
+      clearClipboardAfter(30000);
+    } catch { toast('No se pudo copiar', 'error'); }
+  }
+
+  return { $, show, hide, setPage, setState, setView, showModal, hideModal, showReauth, toast, err, eyeToggle, passwordStrength, updateStrength, copyToClipboard };
+})();
+
+// ─────────────────────────────────────────────
+// HADES-V2-APP: Application Controller
+// ─────────────────────────────────────────────
+const App = (() => {
+  const $ = UI.$;
+
+  // ── Utils ──
+  function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
+  function on(id, ev, fn) { const e = $(id); if (e) e.addEventListener(ev, fn); }
+
+  // ── Parallax ──
+  function initParallax() {
+    const orbs = document.querySelectorAll('[data-parallax]');
+    document.addEventListener('mousemove', e => {
+      const x = (e.clientX / window.innerWidth - 0.5);
+      const y = (e.clientY / window.innerHeight - 0.5);
+      orbs.forEach(o => {
+        const s = parseFloat(o.dataset.parallax);
+        o.style.transform = `translate(${x * s}px, ${y * s}px)`;
+      });
+    });
+  }
+
+  function initTilt() {
+    document.querySelectorAll('.tilt-card').forEach(card => {
+      card.addEventListener('mousemove', e => {
+        const r = card.getBoundingClientRect();
+        const x = (e.clientX - r.left) / r.width  - 0.5;
+        const y = (e.clientY - r.top)  / r.height - 0.5;
+        card.style.transform = `perspective(900px) rotateY(${x * 7}deg) rotateX(${-y * 7}deg) translateZ(6px)`;
+      });
+      card.addEventListener('mouseleave', () => {
+        card.style.transform = 'perspective(900px) rotateY(0) rotateX(0) translateZ(0)';
+      });
+    });
+  }
+
+  // ── Theme ──
+  function applyTheme(t) {
+    document.body.classList.toggle('theme-light', t === 'light');
+    document.body.classList.toggle('theme-dark',  t !== 'light');
+    localStorage.setItem('hades_theme', t);
+    const lb = $('theme-light-btn'); const db = $('theme-dark-btn');
+    if (lb) lb.classList.toggle('active', t === 'light');
+    if (db) db.classList.toggle('active', t !== 'light');
+  }
+  function initTheme() {
+    applyTheme(localStorage.getItem('hades_theme') || 'dark');
+    on('theme-toggle-unlock', 'click', () => applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'));
+    on('theme-toggle-app',    'click', () => applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'));
+    on('theme-light-btn', 'click', () => applyTheme('light'));
+    on('theme-dark-btn',  'click', () => applyTheme('dark'));
+  }
+
+  // ── Eye buttons ──
+  function initEyeButtons() {
+    document.querySelectorAll('.eye-btn').forEach(btn => {
+      btn.addEventListener('click', () => UI.eyeToggle(btn.dataset.target));
+    });
+  }
+
+  // ── Sidebar ──
+  function initSidebar() {
+    on('sidebar-toggle', 'click', () => {
+      const s = document.getElementById('sidebar');
+      if (s) s.classList.toggle('open');
+    });
+    document.querySelectorAll('.nav-item[data-view]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        UI.setView(btn.dataset.view);
+        const s = document.getElementById('sidebar');
+        if (s && window.innerWidth < 640) s.classList.remove('open');
+      });
+    });
+    on('btn-lock', 'click', lock);
+  }
+
+  // ── Auto-lock ──
+  function startLockTimer() {
+    clearTimeout(State._lockTimer);
+    const secs = parseInt(localStorage.getItem('hades_autolock') || '300');
+    if (secs <= 0) return;
+    State._lockTimer = setTimeout(lock, secs * 1000);
+    ['click','keydown','touchstart','mousemove'].forEach(ev =>
+      document.addEventListener(ev, resetLockTimer, { passive: true })
+    );
+  }
+  function resetLockTimer() {
+    clearTimeout(State._lockTimer);
+    const secs = parseInt(localStorage.getItem('hades_autolock') || '300');
+    if (secs > 0) State._lockTimer = setTimeout(lock, secs * 1000);
+  }
+  function lock() {
+    clearTimeout(State._lockTimer);
+    State.dek = null; State.kek = null; State.dekB64 = null; State.entries = [];
+    State.failedAttempts = 0;
+    Reauth.invalidate();
+    UI.setPage('unlock');
+    UI.setState('state-login');
+    const lp = $('login-password'); if (lp) lp.value = '';
+    UI.hide('login-error'); UI.hide('login-attempts-wrap');
+  }
+
+  // ── Enter App ──
+  async function enterApp(dek, kek, user) {
+    State.dek = dek; State.kek = kek; State.user = user || 'Usuario';
+    State.failedAttempts = 0;
+    State.entries = await Crypto.loadVault(dek);
+    const el = document.getElementById('home-username');
+    UI.setPage('app');
+    UI.setView('vault');
+    renderEntries();
+    updateBioSettings();
+    const al = $('autolock-select');
+    if (al) al.value = localStorage.getItem('hades_autolock') || '300';
+    on('autolock-select', 'change', () => localStorage.setItem('hades_autolock', $('autolock-select').value));
+    startLockTimer();
+  }
+
+  // ── SETUP ──
+  function initSetup() {
+    // Strength meter on step 1
+    on('reg-password', 'input', () => UI.updateStrength('reg-password','reg-strength-fill','reg-strength-label','reg-strength-wrap'));
+
+    on('btn-setup-next-1', 'click', () => {
+      const name = $('reg-name')?.value.trim();
+      const pwd  = $('reg-password')?.value;
+      const conf = $('reg-confirm')?.value;
+      if (!name) { UI.err('setup-err-1', 'Ingresa tu nombre'); return; }
+      if (!pwd || pwd.length < 10) { UI.err('setup-err-1', 'La contraseña debe tener al menos 10 caracteres'); return; }
+      if (pwd !== conf) { UI.err('setup-err-1', 'Las contraseñas no coinciden'); return; }
+      UI.err('setup-err-1', '');
+      State._setupName = name;
+      State._setupPwd  = pwd;
+      UI.setState('state-setup-2');
     });
 
-    on($('btn-setup-next'), 'click', () => {
-      const name = $('reg-name').value.trim();
-      const pw = $('mp-new').value.trim();
-      const confirm = $('mp-confirm').value;
-      const err = $('setup-error-1');
-      if (!name) { err.textContent = 'Ingresa tu nombre'; err.classList.remove('hidden'); return; }
-      if (pw.length < 8) { err.textContent = 'Mínimo 8 caracteres'; err.classList.remove('hidden'); return; }
-      if (pw !== confirm) { err.textContent = 'Las contraseñas no coinciden'; err.classList.remove('hidden'); return; }
-      err.classList.add('hidden');
-      $('setup-step-1').classList.add('hidden');
-      $('setup-step-2').classList.remove('hidden');
-    });
+    on('btn-setup-back-2', 'click', () => UI.setState('state-setup-1'));
 
-    on($('btn-setup-back'), 'click', () => {
-      $('setup-step-2').classList.add('hidden');
-      $('setup-step-1').classList.remove('hidden');
-    });
-    on($('btn-setup'), 'click', async () => {
-      const name = $('reg-name').value.trim();
-      const pw = $('mp-new').value.trim();
+    on('btn-setup-next-2', 'click', async () => {
       const mode = document.querySelector('input[name="access-mode"]:checked')?.value || 'password';
-      const err = $('setup-error-2');
+      State._setupMode = mode;
+      const btn = $('btn-setup-next-2');
+      btn.disabled = true; btn.textContent = 'Creando bóveda…';
       try {
-        $('btn-setup').disabled = true;
-        $('btn-setup').textContent = 'Calibrando seguridad…';
-        // Crear bóveda
-        State.cryptoKey = await Crypto.initVault(pw);
-        State.entries = [];
-        // Guardar usuario
-        Crypto.saveUser(name, '');
-        // Configurar modo biométrico
-        if (mode === 'biometric' || mode === 'both') {
-          Biometric.setMode(mode);
-          if (Biometric.isSupported()) {
-            try { await Biometric.register(pw); } catch(e) { /* continúa sin huella */ }
-          }
-        }
-        // Generar frase de recuperación
+        const { dek, dekB64 } = await Crypto.initVault(State._setupPwd, State._setupName);
         const phrase = Recovery.generate();
-        Crypto.saveRecovery(phrase);
-        // Mostrar frase
-        $('setup-step-2').classList.add('hidden');
-        $('setup-step-3').classList.remove('hidden');
-        Recovery.renderPhrase(phrase, 'recovery-phrase-display');
+        State._pendingPhrase  = phrase;
+        State._pendingDekB64  = dekB64;
+        State._pendingDek     = dek;
+        await Recovery.save(phrase, dekB64);
+        Recovery.renderPhrase(phrase, 'phrase-display');
+        UI.setState('state-setup-3');
       } catch (e) {
         console.error('Setup error:', e);
-        err.textContent = 'Error al crear bóveda';
-        err.classList.remove('hidden');
-        $('btn-setup').disabled = false;
-        $('btn-setup').textContent = 'Finalizar';
+        UI.err('setup-err-2', 'Error al crear la bóveda. Intenta de nuevo.');
+      } finally {
+        btn.disabled = false; btn.textContent = 'Siguiente →';
       }
     });
 
-    on($('btn-setup-finish'), 'click', () => {
-      enterApp();
+    on('btn-setup-finish', 'click', async () => {
+      if (State._setupMode === 'both' && Biometric.isSupported()) {
+        try {
+          const result = await Crypto.verifyPassword(State._setupPwd);
+          if (result) await Biometric.register(result.dek, result.kek);
+        } catch (e) {
+          console.warn('Biometric registration skipped:', e);
+        }
+      }
+      await enterApp(State._pendingDek, null, State._setupName);
+      State._setupPwd = null; State._pendingDekB64 = null;
     });
-  } else {
-    // Configurar pantalla según modo biométrico
-    const bioMode = Biometric.getMode();
-    const hasCredential = !!Biometric.getCredentialId();
-    if ((bioMode === 'biometric' || bioMode === 'both') && hasCredential && Biometric.isSupported()) {
-      $('btn-biometric').classList.remove('hidden');
-      $('biometric-hint').classList.remove('hidden');
-      if (bioMode === 'biometric') {
-        // Solo huella: ocultar formulario de contraseña
-        $('mp-enter').closest('.field-group').classList.add('hidden');
-        $('btn-unlock').classList.add('hidden');
-        $('biometric-hint').classList.add('hidden');
-      }
-      // Auto-trigger huella si modo es solo biométrico
-      if (bioMode === 'biometric') {
-        setTimeout(() => $('btn-biometric').click(), 400);
-      }
-    }
-    on($('btn-biometric'), 'click', async () => {
-      const btn = $('btn-biometric');
-      btn.classList.add('scanning');
-      btn.disabled = true;
+  }
+
+  // ── LOGIN ──
+  function initLogin() {
+    on('btn-login', 'click', async () => {
+      const pwd = $('login-password')?.value;
+      if (!pwd) return;
+      const btn = $('btn-login');
+      btn.disabled = true; btn.textContent = 'Verificando…';
       try {
-        // Obtiene la contraseña maestra directamente desde la huella
-        const password = await Biometric.verifyAndGetPassword();
-        const bioMode = Biometric.getMode();
-        if (bioMode === 'both') {
-          // Modo ambos: huella OK, ahora pedir contraseña maestra
-          btn.classList.remove('scanning');
-          btn.disabled = false;
-          showToast('Huella verificada ✓ — ingresa tu contraseña');
-          $('mp-enter').closest('.field-group').classList.remove('hidden');
-          $('btn-unlock').classList.remove('hidden');
-          $('btn-biometric').classList.add('hidden');
-          $('biometric-hint').classList.add('hidden');
-          $('mp-enter').focus();
-          State._bioVerified = true;
-        } else {
-          // Modo solo huella: usar contraseña descifrada directamente
-          const key = await Crypto.verifyPassword(password);
-          if (key) {
-            State.cryptoKey = key;
-            State.entries = await Crypto.loadVault(key, Crypto._getKDFHeader());
-            enterApp();
+        const result = await Crypto.verifyPassword(pwd);
+        if (!result) {
+          State.failedAttempts++;
+          const left = State.MAX_ATTEMPTS - State.failedAttempts;
+          if (left <= 0) {
+            UI.err('login-error', 'Sin intentos restantes.');
+            UI.show('login-attempts-wrap');
+            $('login-attempts-msg').textContent = 'Usa tu frase de recuperación para restablecer el acceso.';
+            btn.disabled = true;
           } else {
-            throw new Error('Clave inválida');
+            UI.err('login-error', `Contraseña incorrecta. ${left} intento${left > 1 ? 's' : ''} restante${left > 1 ? 's' : ''}.`);
+            if (State.failedAttempts >= 2) {
+              UI.show('login-attempts-wrap');
+              $('login-attempts-msg').textContent = `Quedan ${left} intento${left > 1 ? 's' : ''}.`;
+            }
           }
-        }
-      } catch (e) {
-        btn.classList.remove('scanning');
-        btn.disabled = false;
-        if (e.name === 'NotAllowedError') {
-          showToast('Verificación cancelada');
-        } else {
-          showToast('Error biométrico — usa tu contraseña');
-          $('mp-enter').closest('.field-group').classList.remove('hidden');
-          $('btn-unlock').classList.remove('hidden');
-        }
-      }
-    });
-    // Contador de intentos fallidos
-    let failCount = parseInt(localStorage.getItem('hades_fail_count') || '0');
-    function updateAttemptsUI() {
-      if (failCount >= 1) {
-        $('unlock-attempts-wrap').classList.remove('hidden');
-        const remaining = 3 - failCount;
-        if (remaining > 0) {
-          $('attempts-warning').textContent = 'Intento fallido. Te quedan ' + remaining + ' intento' + (remaining === 1 ? '' : 's') + '.';
-          $('btn-forgot').classList.add('hidden');
-          $('btn-unlock').disabled = false;
-          $('mp-enter').disabled = false;
-        } else {
-          $('attempts-warning').textContent = '3 intentos fallidos. Usa tu frase de recuperación.';
-          $('btn-forgot').classList.remove('hidden');
-          $('btn-unlock').disabled = true;
-          $('mp-enter').disabled = true;
-        }
-      } else {
-        $('unlock-attempts-wrap').classList.add('hidden');
-      }
-    }
-    updateAttemptsUI();
-
-    on($('btn-unlock'), 'click', async () => {
-      const pw = $('mp-enter').value;
-      if (!pw) return;
-      $('btn-unlock').disabled = true;
-      $('btn-unlock').textContent = 'Verificando…';
-      $('unlock-error').classList.add('hidden');
-      const key = await Crypto.verifyPassword(pw);
-      if (!key) {
-        failCount = Math.min(failCount + 1, 3);
-        localStorage.setItem('hades_fail_count', failCount);
-        $('unlock-error').classList.remove('hidden');
-        $('btn-unlock').disabled = false;
-        $('btn-unlock').textContent = 'Entrar';
-        $('mp-enter').focus();
-        State._bioVerified = false;
-        updateAttemptsUI();
-        return;
-      }
-      localStorage.setItem('hades_fail_count', '0');
-      State._bioVerified = false;
-      State.cryptoKey = key;
-      State.entries = await Crypto.loadVault(key, Crypto._getKDFHeader());
-      // ── Migración silenciosa recovery_verifier legacy → v1 seguro ──
-      // Si existe formato Base64 simple (pre-PBKDF2), no es posible migrar sin
-      // la frase original (no la tenemos aquí). Se elimina y se invita a regenerar.
-      try {
-        const stored = localStorage.getItem(Crypto.RECOVERY_KEY);
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          // Si parsea y tiene .kdf → ya es v1 seguro, no hacer nada
-        }
-      } catch {
-        // No parsea → es Base64 simple legacy → eliminar definitivamente
-        localStorage.removeItem(Crypto.RECOVERY_KEY);
-        showToast('Frase de recuperación reseteada por seguridad. Genérala en Ajustes.');
-      }
-      enterApp();
-    });
-    on($('mp-enter'), 'keydown', e => { if (e.key === 'Enter') $('btn-unlock').click(); });
-
-    // Recuperación por frase de 12 palabras
-    on($('btn-forgot'), 'click', () => {
-      $('unlock-existing').classList.add('hidden');
-      $('unlock-recovery').classList.remove('hidden');
-      Recovery.renderInputs('recovery-input-grid');
-    });
-    on($('btn-recovery-back'), 'click', () => {
-      $('unlock-recovery').classList.add('hidden');
-      $('unlock-existing').classList.remove('hidden');
-    });
-    on($('btn-recovery-verify'), 'click', async () => {
-      const words = Recovery.getInputWords('recovery-input-grid');
-      if (words.some(w => !w)) { showToast('Completa todas las palabras'); return; }
-      if (!await Crypto.verifyRecovery(words)) {
-        $('recovery-error').classList.remove('hidden');
-        return;
-      }
-      $('recovery-error').classList.add('hidden');
-      $('unlock-recovery').classList.add('hidden');
-      $('unlock-new-password').classList.remove('hidden');
-    });
-    on($('btn-recovery-save'), 'click', async () => {
-      const newPw = $('recovery-pw-new').value.trim();
-      const confirm = $('recovery-pw-confirm').value;
-      const err = $('recovery-pw-error');
-      if (newPw.length < 8) { err.textContent = 'Mínimo 8 caracteres'; err.classList.remove('hidden'); return; }
-      if (newPw !== confirm) { err.textContent = 'Las contraseñas no coinciden'; err.classList.remove('hidden'); return; }
-      err.classList.add('hidden');
-      const ok = await showConfirm(
-        'Restablecer contraseña',
-        'La bóveda se reiniciará vacía al cambiar la contraseña. ¿Continuar?'
-      );
-      if (!ok) return;
-      // ── Flujo seguro de re-cifrado post-recuperación ──
-      // Frase verificada → autorizado crear nueva contraseña → re-cifrar bóveda
-      // La bóveda se reinicia vacía (no hay forma de descifrar con clave anterior desconocida)
-      // Nuevo recovery_verifier se genera con la misma frase (el usuario ya la tiene anotada)
-      // No se expone ningún secreto previo
-      const btn = $('btn-recovery-save');
-      btn.disabled = true;
-      btn.textContent = 'Procesando…';
-      try {
-        // 1. Eliminar vault anterior (no recuperable sin clave vieja)
-        Crypto.deleteVault();
-        // 2. Inicializar nueva bóveda con nueva contraseña (atómico + KDF calibrado)
-        State.cryptoKey = await Crypto.initVault(newPw);
-        State.entries = [];
-        // 3. Regenerar recovery_verifier con nueva salt (mismo flujo que registro)
-        //    La frase sigue siendo válida — solo se rederiva con salt nueva
-        const phrase = Recovery.generate();
-        await Crypto.saveRecovery(phrase);
-        // 4. Limpiar contador de intentos
-        localStorage.setItem('hades_fail_count', '0');
-        // 5. Limpiar biométrico (credencial vieja ya no corresponde a la nueva clave)
-        Biometric.clearAll();
-        ReauthManager.invalidate(); // HADES-REAUTH: recovery es evento de alto riesgo
-    showToast('✅ Contraseña restablecida');
-        // 6. Mostrar nueva frase de recuperación
-        $('unlock-new-password').classList.add('hidden');
-        $('unlock-first-time').classList.remove('hidden');
-        $('setup-step-1').classList.add('hidden');
-        $('setup-step-2').classList.add('hidden');
-        $('setup-step-3').classList.remove('hidden');
-        Recovery.renderPhrase(phrase, 'recovery-phrase-display');
-      } catch(e) {
-        err.textContent = 'Error al restablecer'; err.classList.remove('hidden');
-        btn.disabled = false;
-        btn.textContent = 'Guardar contraseña';
-      }
-    });
-  }
-}
-function enterApp() {
-  $('page-unlock').classList.add('hidden');
-  $('page-home').classList.remove('hidden');
-  $('page-app').classList.add('hidden');
-  document.body.dataset.page = 'home';
-  loadAutoLockSetting();
-  loadBiometricSetting();
-  resetAutoLock();
-  history.replaceState({ page: 'home' }, '', '');
-  document.addEventListener('mousemove', resetAutoLock, { passive: true });
-  document.addEventListener('keydown', resetAutoLock, { passive: true });
-  document.addEventListener('touchstart', resetAutoLock, { passive: true });
-}
-
-function goToApp(view) {
-  $('page-home').classList.add('hidden');
-  $('page-app').classList.remove('hidden');
-  document.body.dataset.page = 'app';
-  renderVault();
-  switchView(view);
-  history.pushState({ page: 'app', view }, '', '');
-}
-
-function goHome() {
-  $('page-app').classList.add('hidden');
-  $('page-home').classList.remove('hidden');
-  document.body.dataset.page = 'home';
-  history.pushState({ page: 'home' }, '', '');
-}
-// ── VIEWS ─────────────────────────────────────────────
-const ALL_VIEWS = ['vault', 'generator', 'settings', 'help', 'about'];
-const VIEW_TITLES = {
-  vault: 'Bóveda',
-  generator: 'Generador',
-  settings: 'Ajustes',
-  help: 'Ayuda',
-  about: 'Acerca de'
-};
-
-function switchView(view, pushHistory = true) {
-  State.currentView = view;
-  ALL_VIEWS.forEach(v => {
-    $(`view-${v}`)?.classList.toggle('hidden', v !== view);
-    document.querySelector(`.nav-item[data-view="${v}"]`)?.classList.toggle('active', v === view);
-  });
-  $('view-title').textContent = VIEW_TITLES[view] || '';
-  // Agregar al historial del navegador para que el botón de retroceso funcione
-  if (pushHistory) {
-    history.pushState({ view }, '', '');
-  }
-  if (window.innerWidth <= 768) {
-    $('sidebar').classList.remove('open');
-    document.querySelector('.sidebar-overlay')?.classList.remove('show');
-  }
-}
-
-// Escuchar el botón de retroceso del navegador/smartphone
-window.addEventListener('popstate', (e) => {
-  const page = e.state?.page || 'home';
-  const view = e.state?.view || 'vault';
-  // Si hay modales abiertos, cerrarlos primero
-  const modals = ['modal-entry', 'modal-view', 'modal-confirm', 'modal-change-master'];
-  const openModal = modals.find(m => !$(m)?.classList.contains('hidden'));
-  if (openModal) {
-    $(openModal).classList.add('hidden');
-    history.pushState({ page: 'app', view: State.currentView }, '', '');
-    return;
-  }
-  // Si estamos en la app y el historial dice home, volver al home
-  if (page === 'home' && document.body.dataset.page === 'app') {
-    goHome();
-    return;
-  }
-  // Si estamos en home y presionan retroceso, dejar que minimice
-  if (page === 'home' && document.body.dataset.page === 'home') return;
-  // Navegar entre vistas dentro de la app
-  switchView(view, false);
-});
-
-// ── VAULT RENDER ──────────────────────────────────────
-function renderVault() {
-  const search = $('search-input')?.value.toLowerCase() || '';
-  const cat = State.currentCat;
-  let filtered = State.entries.filter(e => {
-    const matchCat = cat === 'all' || e.type === cat;
-    const term = search;
-    const name = (e.name || e.cardName || e.noteTitle || e.firstName || '').toLowerCase();
-    const user = (e.username || '').toLowerCase();
-    const url = (e.url || '').toLowerCase();
-    const matchSearch = !term || name.includes(term) || user.includes(term) || url.includes(term);
-    return matchCat && matchSearch;
-  });
-  const grid = $('entries-grid');
-  const empty = $('empty-state');
-  if (filtered.length === 0) {
-    grid.innerHTML = '';
-    empty.classList.remove('hidden');
-  } else {
-    empty.classList.add('hidden');
-    grid.innerHTML = '';
-    filtered.forEach(e => grid.appendChild(renderEntryCard(e)));
-    grid.querySelectorAll('.entry-card').forEach(card => {
-      on(card, 'click', () => openViewModal(card.dataset.id));
-    });
-  }
-}
-function entryIcon(e) {
-  const icons = { login: (e.name || '?')[0].toUpperCase(), card: '💳', note: '📝', identity: '👤' };
-  return icons[e.type] || '?';
-}
-function tagLabel(type) {
-  const map = { login: ['login-tag', 'Login'], card: ['card-tag', 'Tarjeta'], note: ['note-tag', 'Nota'], identity: ['identity-tag', 'Identidad'] };
-  const [cls, label] = map[type] || ['login-tag', type];
-  return `<span class="entry-tag ${cls}">${label}</span>`;
-}
-// Construye entry card via DOM API — sin innerHTML, sin data-* sensibles
-function renderEntryCard(e) {
-  const name = e.name || e.cardName || e.noteTitle || (e.firstName ? `${e.firstName} ${e.lastName}` : 'Sin nombre');
-  const sub = e.username || (e.type === 'card' ? `•••• ${(e.cardNumber || '').slice(-4) || '••••'}` : e.noteTitle ? 'Nota segura' : e.email || '');
-
-  const card = document.createElement('div');
-  card.className = 'entry-card';
-  card.dataset.id = e.id; // id no es secreto — es UUID
-
-  const header = document.createElement('div');
-  header.className = 'entry-card-header';
-
-  const favicon = document.createElement('div');
-  favicon.className = 'entry-favicon';
-  favicon.textContent = entryIcon(e);
-
-  const info = document.createElement('div');
-  info.className = 'entry-card-info';
-
-  const nameEl = document.createElement('div');
-  nameEl.className = 'entry-card-name';
-  nameEl.textContent = name; // textContent — nunca HTML
-
-  const subEl = document.createElement('div');
-  subEl.className = 'entry-card-user';
-  subEl.textContent = sub;
-
-  info.appendChild(nameEl);
-  info.appendChild(subEl);
-  header.appendChild(favicon);
-  header.appendChild(info);
-
-  // Tag label via DOM
-  const tagEl = document.createElement('span');
-  const tagMap = { login: ['Login', ''], card: ['Tarjeta', 'card-tag'], note: ['Nota', 'note-tag'], identity: ['Identidad', 'identity-tag'] };
-  const [tagText, tagClass] = tagMap[e.type] || ['', ''];
-  tagEl.className = `entry-tag ${tagClass}`.trim();
-  tagEl.textContent = tagText;
-  header.appendChild(tagEl);
-
-  card.appendChild(header);
-
-  if (e.url) {
-    const urlEl = document.createElement('div');
-    urlEl.className = 'entry-card-url';
-    urlEl.textContent = e.url;
-    card.appendChild(urlEl);
-  }
-
-  return card; // Retorna nodo DOM, no string
-}
-function escHtml(s) {
-  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-// ── ADD / EDIT ENTRY ──────────────────────────────────
-function openAddModal(prefill = null) {
-  State.editingId = prefill ? prefill.id : null;
-  const isEdit = !!prefill;
-  $('modal-entry-title').textContent = isEdit ? 'Editar entrada' : 'Nueva entrada';
-  clearEntryForm();
-  $('modal-entry').classList.remove('hidden');
-  history.pushState({ view: State.currentView, modal: 'entry' }, '', '');
-  if (isEdit) {
-    $('entry-type').value = prefill.type || 'login';
-    switchEntryType(prefill.type || 'login');
-    fillEntryForm(prefill);
-  } else {
-    switchEntryType('login');
-  }
-}
-function clearEntryForm() {
-  ['f-name','f-url','f-username','f-password','f-notes',
-   'c-name','c-number','c-expiry','c-cvv','c-notes',
-   'n-title','n-content',
-   'i-first','i-last','i-email','i-phone','i-address'
-  ].forEach(id => { if ($(id)) $(id).value = ''; });
-}
-function fillEntryForm(e) {
-  if (e.type === 'login') {
-    if ($('f-name')) $('f-name').value = e.name || '';
-    if ($('f-url')) $('f-url').value = e.url || '';
-    if ($('f-username')) $('f-username').value = e.username || '';
-    if ($('f-password')) $('f-password').value = e.password || '';
-    if ($('f-notes')) $('f-notes').value = e.notes || '';
-  } else if (e.type === 'card') {
-    if ($('c-name')) $('c-name').value = e.cardName || '';
-    if ($('c-number')) $('c-number').value = e.cardNumber || '';
-    if ($('c-expiry')) $('c-expiry').value = e.expiry || '';
-    if ($('c-cvv')) $('c-cvv').value = e.cvv || '';
-    if ($('c-notes')) $('c-notes').value = e.notes || '';
-  } else if (e.type === 'note') {
-    if ($('n-title')) $('n-title').value = e.noteTitle || '';
-    if ($('n-content')) $('n-content').value = e.noteContent || '';
-  } else if (e.type === 'identity') {
-    if ($('i-first')) $('i-first').value = e.firstName || '';
-    if ($('i-last')) $('i-last').value = e.lastName || '';
-    if ($('i-email')) $('i-email').value = e.email || '';
-    if ($('i-phone')) $('i-phone').value = e.phone || '';
-    if ($('i-address')) $('i-address').value = e.address || '';
-  }
-}
-function switchEntryType(type) {
-  ['login','card','note','identity'].forEach(t => {
-    $(`fields-${t}`).classList.toggle('hidden', t !== type);
-  });
-}
-function collectEntry() {
-  const type = $('entry-type').value;
-  const base = { id: State.editingId || crypto.randomUUID(), type, createdAt: Date.now() };
-  if (type === 'login') {
-    return { ...base, name: $('f-name').value.trim(), url: $('f-url').value.trim(), username: $('f-username').value.trim(), password: $('f-password').value, notes: $('f-notes').value.trim() };
-  } else if (type === 'card') {
-    return { ...base, cardName: $('c-name').value.trim(), cardNumber: $('c-number').value.trim(), expiry: $('c-expiry').value.trim(), cvv: $('c-cvv').value.trim(), notes: $('c-notes').value.trim() };
-  } else if (type === 'note') {
-    return { ...base, noteTitle: $('n-title').value.trim(), noteContent: $('n-content').value.trim() };
-  } else {
-    return { ...base, firstName: $('i-first').value.trim(), lastName: $('i-last').value.trim(), email: $('i-email').value.trim(), phone: $('i-phone').value.trim(), address: $('i-address').value.trim() };
-  }
-}
-async function saveEntry() {
-  const entry = collectEntry();
-  const name = entry.name || entry.cardName || entry.noteTitle || entry.firstName;
-  if (!name) return showToast('Ingresa un nombre para la entrada');
-  if (State.editingId) {
-    const idx = State.entries.findIndex(e => e.id === State.editingId);
-    if (idx !== -1) State.entries[idx] = entry;
-  } else {
-    State.entries.unshift(entry);
-  }
-  await Crypto.saveVault(State.cryptoKey, State.entries, Crypto._getKDFHeader());
-  $('modal-entry').classList.add('hidden');
-  renderVault();
-  showToast(State.editingId ? 'Entrada actualizada' : 'Entrada guardada');
-  State.editingId = null;
-}
-// ── VIEW ENTRY MODAL ──────────────────────────────────
-async function openViewModal(id) { // HADES-REAUTH para tarjetas
-  const e = State.entries.find(en => en.id === id);
-  if (!e) return;
-  // Tarjetas exponen número completo y CVV — requieren reauth
-  if (e.type === 'card') {
-    if (!await ReauthManager.require('ver datos completos de tarjeta')) return;
-  }
-  State.editingId = id;
-  const name = e.name || e.cardName || e.noteTitle || (e.firstName ? `${e.firstName} ${e.lastName}` : '—');
-  $('view-entry-name').textContent = name;
-  const body = $('view-entry-body');
-  body.innerHTML = '';
-  // field() y text() usan DOM API — sin innerHTML, sin data-* con secretos
-  // El valor sensible se guarda en closure de JS (no en DOM)
-  const makeSvg = (path) => {
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('viewBox', '0 0 24 24');
-    svg.innerHTML = path; // SVG hardcodeado — no datos usuario
-    return svg;
-  };
-
-  const field = (label, value, secret = false) => {
-    const wrap = document.createElement('div');
-    wrap.className = 'view-field';
-
-    const labelEl = document.createElement('div');
-    labelEl.className = 'view-field-label';
-    labelEl.textContent = label;
-
-    const valueRow = document.createElement('div');
-    valueRow.className = 'view-field-value';
-
-    const span = document.createElement('span');
-    if (secret) {
-      span.className = 'password-dots';
-      span.textContent = '•'.repeat(Math.min((value || '').length, 12));
-      // El valor real vive en closure — nunca en el DOM
-      let shown = false;
-      const eyeBtn = document.createElement('button');
-      eyeBtn.className = 'copy-btn eye-inline';
-      eyeBtn.title = 'Mostrar/ocultar';
-      eyeBtn.appendChild(makeSvg('<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'));
-      eyeBtn.addEventListener('click', () => {
-        shown = !shown;
-        span.textContent = shown ? value : '•'.repeat(Math.min((value || '').length, 12));
-      });
-      valueRow.appendChild(span);
-      valueRow.appendChild(eyeBtn);
-    } else {
-      span.textContent = value || '';
-      valueRow.appendChild(span);
-    }
-
-    // Botón copiar: valor en closure, no en data-*
-    const copyBtn = document.createElement('button');
-    copyBtn.className = 'copy-btn';
-    copyBtn.title = 'Copiar';
-    copyBtn.appendChild(makeSvg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'));
-    copyBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText(value || '').then(() => showToast('Copiado al portapapeles'));
-    });
-    valueRow.appendChild(copyBtn);
-
-    wrap.appendChild(labelEl);
-    wrap.appendChild(valueRow);
-    return wrap;
-  };
-
-  const text = (label, value) => {
-    if (!value) return;
-    const wrap = document.createElement('div');
-    wrap.className = 'view-field';
-    const labelEl = document.createElement('div');
-    labelEl.className = 'view-field-label';
-    labelEl.textContent = label;
-    const valEl = document.createElement('div');
-    valEl.className = 'view-field-value';
-    const span = document.createElement('span');
-    span.textContent = value; // textContent — sin HTML
-    valEl.appendChild(span);
-    wrap.appendChild(labelEl);
-    wrap.appendChild(valEl);
-    body.appendChild(wrap);
-  };
-  if (e.type === 'login') {
-    if (e.name) body.appendChild(field('Sitio', e.name));
-    if (e.url) body.appendChild(field('URL', e.url));
-    if (e.username) body.appendChild(field('Usuario', e.username));
-    if (e.password) body.appendChild(field('Contraseña', e.password, true));
-    if (e.notes) text('Notas', e.notes);
-  } else if (e.type === 'card') {
-    if (e.cardName) body.appendChild(field('Nombre', e.cardName));
-    if (e.cardNumber) body.appendChild(field('Número', e.cardNumber, true));
-    if (e.expiry) body.appendChild(field('Vencimiento', e.expiry));
-    if (e.cvv) body.appendChild(field('CVV', e.cvv, true));
-    if (e.notes) text('Notas', e.notes);
-  } else if (e.type === 'note') {
-    if (e.noteTitle) body.appendChild(field('Título', e.noteTitle));
-    if (e.noteContent) body.appendChild(field('Contenido', e.noteContent, false));
-  } else if (e.type === 'identity') {
-    text('Nombre', `${e.firstName} ${e.lastName}`);
-    text('Email', e.email);
-    text('Teléfono', e.phone);
-    text('Dirección', e.address);
-  }
-  $('modal-view').classList.remove('hidden');
-  history.pushState({ view: State.currentView, modal: 'view' }, '', '');
-  // Copy y eye-inline buttons usan closures — event listeners agregados en field()
-}
-// ── DELETE ENTRY ──────────────────────────────────────
-async function deleteEntry(id) {
-  const ok = await showConfirm('Eliminar entrada', '¿Eliminar esta entrada permanentemente?');
-  if (!ok) return;
-  State.entries = State.entries.filter(e => e.id !== id);
-  await Crypto.saveVault(State.cryptoKey, State.entries, Crypto._getKDFHeader());
-  $('modal-view').classList.add('hidden');
-  renderVault();
-  showToast('Entrada eliminada');
-}
-// ── PASSWORD GENERATOR ────────────────────────────────
-function generatePassword(length = 16, opts = {}) {
-  const upper = opts.upper !== false ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' : '';
-  const lower = opts.lower !== false ? 'abcdefghijklmnopqrstuvwxyz' : '';
-  const numbers = opts.numbers !== false ? '0123456789' : '';
-  const symbols = opts.symbols !== false ? '!@#$%^&*()-_=+[]{}|;:,.<>?' : '';
-  const charset = upper + lower + numbers + symbols;
-  if (!charset) return '';
-  const arr = new Uint32Array(length);
-  crypto.getRandomValues(arr);
-  return Array.from(arr, n => charset[n % charset.length]).join('');
-}
-function passwordStrength(pw) {
-  let score = 0;
-  if (pw.length >= 8) score++;
-  if (pw.length >= 12) score++;
-  if (pw.length >= 16) score++;
-  if (/[A-Z]/.test(pw)) score++;
-  if (/[a-z]/.test(pw)) score++;
-  if (/[0-9]/.test(pw)) score++;
-  if (/[^A-Za-z0-9]/.test(pw)) score++;
-  return Math.min(score, 5);
-}
-function updateStrengthUI(fillId, labelId, score) {
-  const fill = $(fillId);
-  const label = $(labelId);
-  if (!fill || !label) return;
-  const pct = (score / 5) * 100;
-  fill.style.width = pct + '%';
-  const colors = ['#f43f5e','#f97316','#eab308','#22c55e','#10b981'];
-  const labels = ['Muy débil','Débil','Regular','Fuerte','Muy fuerte'];
-  fill.style.background = colors[score - 1] || '#f43f5e';
-  label.textContent = labels[score - 1] || '—';
-}
-function renderGenerator() {
-  const len = parseInt($('gen-length').value) || 16;
-  const opts = {
-    upper: $('use-upper').checked,
-    lower: $('use-lower').checked,
-    numbers: $('use-numbers').checked,
-    symbols: $('use-symbols').checked,
-  };
-  const pw = generatePassword(len, opts);
-  $('gen-output').textContent = pw || '— selecciona al menos un tipo —';
-  const s = passwordStrength(pw);
-  updateStrengthUI('gen-strength-fill', 'gen-strength-label', s);
-  return pw;
-}
-// ── SETTINGS ──────────────────────────────────────────
-function loadBiometricSetting() {
-  const mode = Biometric.getMode();
-  if ($('biometric-mode-select')) $('biometric-mode-select').value = mode;
-  const hasCredential = !!Biometric.getCredentialId();
-  const showRegister = (mode !== 'off') && !hasCredential;
-  $('biometric-register-row')?.classList.toggle('hidden', !showRegister);
-}
-
-function loadAutoLockSetting() {
-  const saved = localStorage.getItem('hades_autolock');
-  const val = saved !== null ? parseInt(saved) : 300;
-  State.autoLockSeconds = val;
-  if ($('auto-lock-select')) $('auto-lock-select').value = String(val);
-}
-// ── EXPORT / IMPORT ───────────────────────────────────
-async function exportVault() {
-  // Validar que todos los componentes del vault existen antes de exportar
-  const vaultEnc = localStorage.getItem(Crypto.VAULT_KEY);
-  const metaEnc  = localStorage.getItem(Crypto.META_KEY);
-  const kdfRaw   = localStorage.getItem(Crypto.KDF_KEY);
-  const dekEnc   = localStorage.getItem(Crypto.DEK_KEY); // v3: DEK cifrada con KEK
-
-  if (!vaultEnc || !metaEnc) {
-    showToast('Error: bóveda incompleta, no se puede exportar');
-    return;
-  }
-
-  // Estructura v3: incluye DEK cifrada (sin ella el backup v3 es inutilizable)
-  const backup = {
-    version: '3.0',
-    vault:        vaultEnc,  // AES-GCM(DEK, entries)
-    dek:          dekEnc,    // AES-GCM(KEK, DEK_raw) — cifrado, seguro exportar
-    kdf:          kdfRaw,    // Header KDF público (salt, iterations, version)
-    meta:         metaEnc,   // AES-GCM(KEK, verifier)
-    recovery:     localStorage.getItem(Crypto.RECOVERY_KEY) || null, // Verifier irreversible
-    user:         localStorage.getItem(Crypto.USER_KEY) || null,     // Nombre (no sensible)
-    // hades_salt legacy NO incluida
-    exported_at: new Date().toISOString(),
-  };
-
-  const data = JSON.stringify(backup);
-  const blob = new Blob([data], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `hades-backup-${new Date().toISOString().slice(0,10)}.hades`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  showToast('Backup exportado (cifrado AES-256-GCM)');
-}
-// ── IMPORT HARDENING HELPERS ─────────────────────────
-// HADES-IMPORT-HARDENING: Límite de tamaño del backup
-// Justificación: 1000 entradas × ~500B promedio × 1.33 (base64) ≈ 665KB
-// 512KB es el límite conservador — cubre uso real con margen holgado para
-// el resto de keys de localStorage (~5MB límite total por origin).
-const IMPORT_MAX_BYTES = 512 * 1024; // 512KB
-
-// HADES-IMPORT-HARDENING: Validar que un string es base64 válido y no vacío
-function isValidBase64(str) {
-  if (typeof str !== 'string' || str.length === 0) return false;
-  // Longitud debe ser múltiplo de 4 (con padding)
-  if (str.length % 4 !== 0) return false;
-  // Solo caracteres base64 válidos + padding
-  return /^[A-Za-z0-9+/]*={0,2}$/.test(str);
-}
-
-// HADES-IMPORT-HARDENING: Validar estructura del KDF header
-function isValidKDFHeader(raw) {
-  try {
-    const h = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    if (typeof h !== 'object' || h === null) return false;
-    if (typeof h.kdf !== 'string' || !h.kdf) return false;
-    if (typeof h.version !== 'number' || h.version < 1) return false;
-    if (typeof h.iterations !== 'number' || h.iterations < 100000) return false;
-    if (!isValidBase64(h.salt)) return false;
-    return h;
-  } catch { return false; }
-}
-
-// HADES-IMPORT-HARDENING: Validar estructura del recovery verifier
-function isValidRecoveryRecord(raw) {
-  try {
-    const r = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    if (typeof r !== 'object' || r === null) return false;
-    if (typeof r.kdf !== 'string') return false;
-    if (typeof r.iterations !== 'number' || r.iterations < 100000) return false;
-    if (!isValidBase64(r.salt)) return false;
-    if (!isValidBase64(r.verifier)) return false;
-    return true;
-  } catch { return false; }
-}
-
-// HADES-IMPORT-HARDENING: Tomar snapshot de todas las claves relevantes del vault actual
-// Claves incluidas en snapshot:
-//   hades_vault, hades_vault_dek, hades_kdf, hades_meta,
-//   hades_recovery, hades_user, hades_salt (legacy)
-// Claves excluidas (no son del vault, no deben restaurarse):
-//   hades_biometric_*, hades_theme, hades_autolock, hades_fail_count
-function snapshotVaultState() {
-  const keys = [
-    Crypto.VAULT_KEY,   // hades_vault
-    Crypto.DEK_KEY,     // hades_vault_dek
-    Crypto.KDF_KEY,     // hades_kdf
-    Crypto.META_KEY,    // hades_meta
-    Crypto.RECOVERY_KEY,// hades_recovery
-    Crypto.USER_KEY,    // hades_user
-    'hades_salt',       // legacy
-  ];
-  const snap = {};
-  keys.forEach(k => { snap[k] = localStorage.getItem(k); }); // null si no existe
-  return snap;
-}
-
-// HADES-IMPORT-HARDENING: Restaurar snapshot completo
-// Escribe las claves que tenían valor, elimina las que no tenían
-function restoreVaultSnapshot(snap) {
-  Object.entries(snap).forEach(([k, v]) => {
-    if (v !== null) {
-      localStorage.setItem(k, v);
-    } else {
-      localStorage.removeItem(k);
-    }
-  });
-}
-
-async function importVault(file) {
-  // ── PASO 1: Límite de tamaño ANTES de leer el contenido ──────────────────
-  // HADES-IMPORT-HARDENING: rechazar antes de parsear
-  if (file.size > IMPORT_MAX_BYTES) {
-    return showToast(`Archivo demasiado grande (máx 512KB, recibido ${Math.round(file.size/1024)}KB)`);
-  }
-
-  let text;
-  try { text = await file.text(); } catch { return showToast('No se pudo leer el archivo'); }
-
-  // Verificación redundante post-lectura (el size puede ser aproximado en algunos browsers)
-  if (text.length > IMPORT_MAX_BYTES) {
-    return showToast('Archivo demasiado grande para importar');
-  }
-
-  // ── PASO 2: Validación de esquema estricta — nada escrito todavía ─────────
-  // HADES-IMPORT-HARDENING: toda validación ocurre aquí antes de tocar localStorage
-
-  let data;
-  try { data = JSON.parse(text); } catch { return showToast('Archivo inválido: no es JSON válido'); }
-  if (typeof data !== 'object' || data === null || Array.isArray(data)) {
-    return showToast('Archivo inválido: estructura incorrecta');
-  }
-
-  // Campos obligatorios para todas las versiones
-  if (!isValidBase64(data.vault)) return showToast('Archivo inválido: campo "vault" ausente o no es base64 válido');
-  if (!isValidBase64(data.meta))  return showToast('Archivo inválido: campo "meta" ausente o no es base64 válido');
-
-  // Detectar y validar versión
-  const ver = data.version;
-  const VALID_VERSIONS = ['3.0', '2.2', 'legacy'];
-
-  let importMode; // 'v3' | 'v22' | 'legacy'
-
-  if (ver === '3.0') {
-    // v3: dek y kdf obligatorios y válidos
-    if (!isValidBase64(data.dek)) {
-      return showToast('Backup v3 inválido: campo "dek" ausente o no es base64 válido');
-    }
-    const kdfParsed = isValidKDFHeader(data.kdf);
-    if (!kdfParsed) {
-      return showToast('Backup v3 inválido: "kdf" debe ser JSON con kdf, version, iterations, salt válidos');
-    }
-    // Consistencia: versión del KDF header debe ser 3 para backup v3
-    if (kdfParsed.version !== 3) {
-      return showToast('Backup v3 inconsistente: versión del KDF header no coincide');
-    }
-    // recovery es opcional, pero si existe debe ser válido
-    if (data.recovery !== undefined && data.recovery !== null) {
-      if (!isValidRecoveryRecord(data.recovery)) {
-        return showToast('Backup v3 inválido: campo "recovery" tiene estructura incorrecta');
-      }
-    }
-    importMode = 'v3';
-
-  } else if (ver === '2.2') {
-    const kdfParsed = isValidKDFHeader(data.kdf);
-    if (!kdfParsed) {
-      return showToast('Backup v2.2 inválido: "kdf" debe ser JSON con kdf, version, iterations, salt válidos');
-    }
-    importMode = 'v22';
-
-  } else if (typeof data.salt === 'string' && data.salt) {
-    // Legacy: sin version field explícito, con salt
-    if (!isValidBase64(data.salt)) {
-      return showToast('Backup legacy inválido: "salt" no es base64 válido');
-    }
-    importMode = 'legacy';
-
-  } else {
-    return showToast(`Archivo inválido: versión desconocida (${ver ?? 'sin versión'})`);
-  }
-
-  // ── PASO 3: Confirmación del usuario ─────────────────────────────────────
-  const versionLabel = { v3: 'v3.0 (formato actual)', v22: 'v2.2', legacy: 'legacy' }[importMode];
-  const ok = await showConfirm(
-    'Importar bóveda',
-    `Se importará un backup ${versionLabel}. Esto reemplazará tu bóveda actual. ¿Continuar?`
-  );
-  if (!ok) return;
-
-  // ── PASO 4: Snapshot del estado actual ANTES de escribir nada ────────────
-  // HADES-IMPORT-HARDENING: si algo falla, restauramos este snapshot íntegro
-  // No usamos deleteVault() como rollback — restauramos el estado previo exacto
-  const previousState = snapshotVaultState();
-
-  let commitSucceeded = false;
-
-  try {
-    // ── PASO 5: Escribir nuevo estado en localStorage ─────────────────────
-    // HADES-IMPORT-HARDENING: escritura secuencial — si cualquier setItem lanza,
-    // el catch restaurará previousState sin haber borrado nada
-
-    if (importMode === 'v3') {
-      localStorage.setItem(Crypto.VAULT_KEY,    data.vault);
-      localStorage.setItem(Crypto.DEK_KEY,      data.dek);
-      localStorage.setItem(Crypto.KDF_KEY,      data.kdf);
-      localStorage.setItem(Crypto.META_KEY,     data.meta);
-      // recovery y user son opcionales — escribir solo si presentes y válidos
-      if (data.recovery) localStorage.setItem(Crypto.RECOVERY_KEY, data.recovery);
-      if (data.user && typeof data.user === 'string') localStorage.setItem(Crypto.USER_KEY, data.user);
-      // Eliminar legacy salt — no debe coexistir con v3
-      localStorage.removeItem('hades_salt');
-
-    } else if (importMode === 'v22') {
-      localStorage.setItem(Crypto.VAULT_KEY,    data.vault);
-      localStorage.setItem(Crypto.KDF_KEY,      data.kdf);
-      localStorage.setItem(Crypto.META_KEY,     data.meta);
-      // v2.2 no tiene DEK separada — se generará en la migración al primer unlock
-      localStorage.removeItem(Crypto.DEK_KEY);
-      localStorage.removeItem('hades_salt');
-
-    } else { // legacy
-      localStorage.setItem(Crypto.VAULT_KEY,    data.vault);
-      localStorage.setItem(Crypto.META_KEY,     data.meta);
-      localStorage.setItem('hades_salt',        data.salt);
-      localStorage.removeItem(Crypto.DEK_KEY);
-      localStorage.removeItem(Crypto.KDF_KEY);
-    }
-
-    // ── PASO 6: Validación de lectura del nuevo estado ───────────────────
-    // HADES-IMPORT-HARDENING: verificar que lo escrito se puede leer correctamente
-    // No podemos descifrar sin la contraseña, pero validamos que las claves
-    // existen, son legibles y tienen el formato esperado post-escritura
-    const readbackVault = localStorage.getItem(Crypto.VAULT_KEY);
-    const readbackMeta  = localStorage.getItem(Crypto.META_KEY);
-
-    if (readbackVault !== data.vault) throw new Error('Readback vault falló');
-    if (readbackMeta  !== data.meta)  throw new Error('Readback meta falló');
-
-    if (importMode === 'v3') {
-      const readbackDek = localStorage.getItem(Crypto.DEK_KEY);
-      const readbackKdf = localStorage.getItem(Crypto.KDF_KEY);
-      if (readbackDek !== data.dek) throw new Error('Readback dek falló');
-      if (readbackKdf !== data.kdf) throw new Error('Readback kdf falló');
-    }
-
-    // ── PASO 7: Commit exitoso ───────────────────────────────────────────
-    commitSucceeded = true;
-
-  } catch (writeError) {
-    // ── ROLLBACK: restaurar snapshot previo íntegramente ──────────────────
-    // HADES-IMPORT-HARDENING: NO se llama deleteVault() — se restaura el estado
-    // anterior completo para que el usuario pueda seguir usando su bóveda previa
-    try {
-      restoreVaultSnapshot(previousState);
-    } catch {
-      // Si la restauración también falla (localStorage lleno, etc.)
-      // documentar el estado — el usuario tendrá que recuperar con frase
-    }
-    showToast('Error al importar: tu bóveda anterior fue restaurada');
-    return;
-  }
-
-  // ── PASO 8: Post-commit — solo llega aquí si commitSucceeded === true ────
-  // Limpiar biométrico — no corresponde al vault importado
-  Biometric.clearAll();
-  ReauthManager.invalidate(); // HADES-REAUTH: importación es evento de alto riesgo
-  showToast('Bóveda importada. Desbloquea con tu contraseña maestra.');
-  lockApp();
-}
-
-/*
- * HADES-IMPORT-HARDENING — Límites residuales por usar localStorage
- * ══════════════════════════════════════════════════════════════════
- * 1. localStorage NO tiene transacciones ACID — si el proceso se interrumpe
- *    (crash del browser, pestaña cerrada) entre escrituras, el estado puede
- *    quedar parcialmente comprometido. El snapshot/restore mitiga esto para
- *    errores de JS, pero no para interrupciones externas del proceso.
- *
- * 2. El readback (Paso 6) confirma que localStorage aceptó los valores,
- *    pero no confirma que el descifrado funcionará — eso solo se sabe al
- *    desbloquear con la contraseña maestra. Si el backup fue generado con
- *    una contraseña diferente, el error aparece en ese momento.
- *
- * 3. Si localStorage está lleno y el rollback también falla (Paso catch),
- *    el usuario queda sin bóveda accesible. Se muestra mensaje apropiado
- *    y puede recuperar acceso con la frase de 12 palabras.
- *
- * 4. El límite de 512KB protege contra DoS por archivo gigante pero no
- *    contra un backup corrupto de tamaño válido — la validación de esquema
- *    y el descifrado posterior son las defensas reales.
- * ══════════════════════════════════════════════════════════════════
- */
-// ── CHANGE MASTER PASSWORD ────────────────────────────
-async function changeMasterPassword() {
-  const current = $('cm-current').value;
-  const newPw = $('cm-new').value;
-  const confirm = $('cm-confirm').value;
-  const err = $('cm-error');
-  err.classList.add('hidden');
-  if (!current || !newPw || !confirm) { err.textContent = 'Completa todos los campos'; err.classList.remove('hidden'); return; }
-  if (newPw.length < 8) { err.textContent = 'Mínimo 8 caracteres'; err.classList.remove('hidden'); return; }
-  if (newPw !== confirm) { err.textContent = 'Las contraseñas no coinciden'; err.classList.remove('hidden'); return; }
-  const testKey = await Crypto.verifyPassword(current);
-  if (!testKey) { err.textContent = 'Contraseña actual incorrecta'; err.classList.remove('hidden'); return; }
-  const btn = $('btn-cm-save');
-  btn.disabled = true;
-  btn.textContent = 'Actualizando…';
-  try {
-    // HADES-REAUTH + Punto 5: rotación completa KEK + DEK en cambio de contraseña
-    // Nueva KEK (nueva salt + iteraciones calibradas) + nueva DEK aleatoria
-    const iterations = await calibrateKDF();
-    const newSalt = Crypto._newSalt();
-    const newHeader = { kdf: 'PBKDF2-SHA256', version: 3, iterations, salt: newSalt };
-    const aadV = Crypto._buildAAD(newHeader, 'vault');
-    const aadD = Crypto._buildAAD(newHeader, 'dek');
-    const aadM = Crypto._buildAAD(newHeader, 'verifier');
-    const newKEK = await Crypto.deriveKEK(newPw, newSalt, iterations);
-    const newDEK = await Crypto.generateDEK();
-    const newDEKRaw = await Crypto.exportDEK(newDEK);
-    const newDEKB64 = btoa(String.fromCharCode(...newDEKRaw));
-    const newDekEnc   = await Crypto._encrypt(newKEK, newDEKB64, aadD);
-    const newVaultEnc = await Crypto._encrypt(newDEK, State.entries, aadV);
-    const newVerifier = await Crypto._encrypt(newKEK, { ok: true, v: 3 }, aadM);
-    // Validar antes de escribir
-    const tDekB64 = await Crypto._decrypt(newKEK, newDekEnc, aadD);
-    const tDek = await Crypto.importDEK(Uint8Array.from(atob(tDekB64), c=>c.charCodeAt(0)));
-    const tVault = await Crypto._decrypt(tDek, newVaultEnc, aadV);
-    if (!Array.isArray(tVault)) throw new Error('Validación fallida');
-    // Escribir atómicamente
-    Crypto._saveKDFHeader(newHeader);
-    localStorage.setItem(Crypto.DEK_KEY, newDekEnc);
-    localStorage.setItem(Crypto.VAULT_KEY, newVaultEnc);
-    localStorage.setItem(Crypto.META_KEY, newVerifier);
-    State.cryptoKey = newDEK; // State.cryptoKey es ahora la DEK
-    $('modal-change-master').classList.add('hidden');
-    ReauthManager.invalidate(); // HADES-REAUTH: cambio de contraseña es evento de alto riesgo
-    showToast('Contraseña maestra actualizada');
-  } catch {
-    err.textContent = 'Error al cambiar la contraseña. Inténtalo de nuevo.';
-    err.classList.remove('hidden');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Guardar';
-  }
-}
-// ── BIND EVENTS ───────────────────────────────────────
-function bindEvents() {
-  on($('theme-toggle-unlock'), 'click', toggleTheme);
-  on($('theme-toggle-home'), 'click', toggleTheme);
-  on($('btn-lock-home'), 'click', lockApp);
-  on($('theme-toggle-app'), 'click', toggleTheme);
-  on($('theme-light-btn'), 'click', () => applyTheme('light'));
-  on($('theme-dark-btn'), 'click', () => applyTheme('dark'));
-  document.querySelectorAll('.nav-item[data-view]').forEach(btn => {
-    on(btn, 'click', () => switchView(btn.dataset.view));
-  });
-  const overlay = document.createElement('div');
-  overlay.className = 'sidebar-overlay';
-  document.body.appendChild(overlay);
-  on($('sidebar-toggle'), 'click', () => {
-    $('sidebar').classList.toggle('open');
-    overlay.classList.toggle('show');
-  });
-  on(overlay, 'click', () => { $('sidebar').classList.remove('open'); overlay.classList.remove('show'); });
-  on($('btn-lock'), 'click', lockApp);
-  // Home menu cards
-  on($('home-btn-vault'),     'click', () => goToApp('vault'));
-  on($('home-btn-generator'), 'click', () => goToApp('generator'));
-  on($('home-btn-settings'),  'click', () => goToApp('settings'));
-  on($('home-btn-help'),      'click', () => goToApp('help'));
-  on($('search-input'), 'input', renderVault);
-  $('category-tabs')?.querySelectorAll('.tab').forEach(tab => {
-    on(tab, 'click', () => {
-      $('category-tabs').querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
-      State.currentCat = tab.dataset.cat;
-      renderVault();
-    });
-  });
-  on($('btn-add-entry'), 'click', () => openAddModal());
-  on($('btn-add-first'), 'click', () => openAddModal());
-  on($('entry-type'), 'change', () => switchEntryType($('entry-type').value));
-  on($('btn-gen-quick'), 'click', () => {
-    const pw = generatePassword(16, { upper: true, lower: true, numbers: true, symbols: true });
-    $('f-password').value = pw;
-    $('f-password').type = 'text';
-    setTimeout(() => $('f-password').type = 'password', 1500);
-    showToast('Contraseña generada');
-  });
-  on($('modal-entry-save'), 'click', saveEntry);
-  on($('modal-entry-close'), 'click', () => { $('modal-entry').classList.add('hidden'); history.back(); });
-  on($('modal-entry-cancel'), 'click', () => { $('modal-entry').classList.add('hidden'); history.back(); });
-  on($('modal-view-close'), 'click', () => { $('modal-view').classList.add('hidden'); history.back(); });
-  on($('btn-delete-entry'), 'click', () => deleteEntry(State.editingId));
-  on($('btn-edit-entry'), 'click', () => {
-    $('modal-view').classList.add('hidden');
-    const entry = State.entries.find(e => e.id === State.editingId);
-    if (entry) openAddModal(entry);
-  });
-  document.querySelectorAll('.eye-btn').forEach(btn => {
-    on(btn, 'click', () => {
-      const input = $(btn.dataset.target);
-      if (!input) return;
-      input.type = input.type === 'password' ? 'text' : 'password';
-    });
-  });
-  on($('btn-generate'), 'click', renderGenerator);
-  on($('gen-length'), 'input', () => { $('len-val').textContent = $('gen-length').value; renderGenerator(); });
-  ['use-upper','use-lower','use-numbers','use-symbols'].forEach(id => on($(id), 'change', renderGenerator));
-  on($('btn-copy-gen'), 'click', () => {
-    const pw = $('gen-output').textContent;
-    if (pw && pw !== 'haz clic en generar') navigator.clipboard.writeText(pw).then(() => showToast('Contraseña copiada'));
-  });
-  on($('auto-lock-select'), 'change', () => {
-    State.autoLockSeconds = parseInt($('auto-lock-select').value);
-    localStorage.setItem('hades_autolock', State.autoLockSeconds);
-    showToast('Auto-bloqueo actualizado');
-    resetAutoLock();
-  });
-  on($('btn-export'), 'click', async () => { // HADES-REAUTH
-    if (!await ReauthManager.require('exportar la bóveda')) return;
-    exportVault();
-  });
-  on($('btn-import'), 'click', async () => { // HADES-REAUTH
-    if (!await ReauthManager.require('importar una bóveda')) return;
-    $('import-file').click();
-  });
-  on($('import-file'), 'change', async () => {
-    const f = $('import-file').files[0];
-    if (f) importVault(f);
-  });
-  on($('btn-delete-vault'), 'click', async () => { // HADES-REAUTH
-    if (!await ReauthManager.require('eliminar la bóveda')) return;
-    const ok = await showConfirm('Eliminar bóveda', 'Esto elimina TODOS tus datos permanentemente y no se puede deshacer.');
-    if (ok) { Crypto.deleteVault(); location.reload(); }
-  });
-  on($('btn-change-master'), 'click', async () => { // HADES-REAUTH
-    if (!await ReauthManager.require('cambiar la contraseña maestra')) return;
-    $('modal-change-master').classList.remove('hidden');
-  });
-  on($('modal-cm-close'), 'click', () => $('modal-change-master').classList.add('hidden'));
-  on($('modal-cm-cancel'), 'click', () => $('modal-change-master').classList.add('hidden'));
-  on($('btn-cm-save'), 'click', changeMasterPassword);
-  on($('c-number'), 'input', () => {
-    let v = $('c-number').value.replace(/\D/g,'').slice(0,16);
-    $('c-number').value = v.match(/.{1,4}/g)?.join(' ') || v;
-  });
-  on($('c-expiry'), 'input', () => {
-    let v = $('c-expiry').value.replace(/\D/g,'').slice(0,4);
-    if (v.length > 2) v = v.slice(0,2) + '/' + v.slice(2);
-    $('c-expiry').value = v;
-  });
-  on($('mp-new'), 'keydown', e => { if (e.key === 'Enter') $('mp-confirm').focus(); });
-  on($('mp-confirm'), 'keydown', e => { if (e.key === 'Enter') $('btn-setup')?.click(); });
-  // Biometric settings
-  on($('biometric-mode-select'), 'change', async () => { // HADES-REAUTH
-    if (!await ReauthManager.require('cambiar el modo de acceso biométrico')) {
-      // Revertir select al valor anterior si cancela
-      $('biometric-mode-select').value = Biometric.getMode();
-      return;
-    }
-    const mode = $('biometric-mode-select').value;
-    const hasCredential = !!Biometric.getCredentialId();
-    if (mode !== 'off' && !hasCredential) {
-      // Necesita registrar primero
-      $('biometric-register-row').classList.remove('hidden');
-    } else {
-      $('biometric-register-row').classList.add('hidden');
-      Biometric.setMode(mode);
-      showToast(mode === 'off' ? 'Acceso biométrico desactivado' : 'Modo biométrico actualizado');
-    }
-  });
-  on($('btn-register-biometric'), 'click', async () => { // HADES-REAUTH
-    if (!await ReauthManager.require('registrar o cambiar la huella dactilar')) return;
-    if (!Biometric.isSupported()) {
-      showToast('Tu dispositivo no soporta biometría');
-      return;
-    }
-    // Necesitamos la contraseña maestra para cifrarla junto a la huella
-    const pw = await new Promise(resolve => {
-      // Modal biométrico construido via DOM API — sin innerHTML con datos usuario
-      const modal = document.createElement('div');
-      modal.className = 'modal-overlay';
-
-      const card = document.createElement('div');
-      card.className = 'glass-card modal-card small';
-
-      const mHeader = document.createElement('div');
-      mHeader.className = 'modal-header';
-      const mTitle = document.createElement('h2');
-      mTitle.textContent = 'Confirmar contraseña';
-      mHeader.appendChild(mTitle);
-
-      const mBody = document.createElement('div');
-      mBody.className = 'modal-body';
-      const hint = document.createElement('p');
-      hint.style.cssText = 'font-size:13px;color:var(--text2);margin-bottom:12px';
-      hint.textContent = 'Ingresa tu contraseña maestra para vincularla con tu huella.';
-      const fg = document.createElement('div');
-      fg.className = 'field-group';
-      const iw = document.createElement('div');
-      iw.className = 'glass-input-wrap';
-      const pwInput = document.createElement('input');
-      pwInput.type = 'password';
-      pwInput.id = 'bio-pw-input';
-      pwInput.placeholder = 'Contraseña maestra';
-      pwInput.autocomplete = 'current-password';
-      iw.appendChild(pwInput);
-      fg.appendChild(iw);
-      const pwErr = document.createElement('p');
-      pwErr.id = 'bio-pw-error';
-      pwErr.className = 'error-msg hidden';
-      pwErr.textContent = 'Contraseña incorrecta';
-      mBody.appendChild(hint);
-      mBody.appendChild(fg);
-      mBody.appendChild(pwErr);
-
-      const mFooter = document.createElement('div');
-      mFooter.className = 'modal-footer';
-      const cancelBtn = document.createElement('button');
-      cancelBtn.className = 'btn-ghost';
-      cancelBtn.id = 'bio-pw-cancel';
-      cancelBtn.textContent = 'Cancelar';
-      const confirmBtn = document.createElement('button');
-      confirmBtn.className = 'btn-primary';
-      confirmBtn.id = 'bio-pw-confirm';
-      confirmBtn.textContent = 'Confirmar';
-      mFooter.appendChild(cancelBtn);
-      mFooter.appendChild(confirmBtn);
-
-      card.appendChild(mHeader);
-      card.appendChild(mBody);
-      card.appendChild(mFooter);
-      modal.appendChild(card);
-      document.body.appendChild(modal);
-      setTimeout(() => modal.querySelector('#bio-pw-input').focus(), 100);
-      modal.querySelector('#bio-pw-cancel').onclick = () => { modal.remove(); resolve(null); };
-      modal.querySelector('#bio-pw-confirm').onclick = async () => {
-        const val = modal.querySelector('#bio-pw-input').value;
-        const testKey = await Crypto.verifyPassword(val);
-        if (!testKey) {
-          modal.querySelector('#bio-pw-error').classList.remove('hidden');
           return;
         }
-        modal.remove();
-        resolve(val);
-      };
-      modal.querySelector('#bio-pw-input').addEventListener('keydown', async e => {
-        if (e.key === 'Enter') modal.querySelector('#bio-pw-confirm').click();
+        const blobs = await DB.get('crypto_blobs', 'blobs');
+        await enterApp(result.dek, result.kek, result.user || blobs?.user || 'Usuario');
+      } finally {
+        if ($('btn-login')) { btn.disabled = false; btn.textContent = 'Entrar'; }
+      }
+    });
+
+    on('login-password', 'keydown', e => { if (e.key === 'Enter') $('btn-login')?.click(); });
+
+    on('btn-forgot', 'click', () => {
+      Recovery.buildRecoveryInputs('recovery-input-grid');
+      UI.setState('state-recovery');
+      UI.hide('recovery-error');
+    });
+
+    on('btn-biometric-login', 'click', async () => {
+      try {
+        const result = await Crypto.verifyPassword('');
+        // For biometric we need kek first — use stored approach
+        // Biometric authenticates then decrypts DEK via bioWrap + kek
+        // Since we need kek to decrypt bioWrap, we ask for password first then bio
+        // This is the conservative design: bio as 2nd factor
+        UI.toast('Para usar huella, ingresa tu contraseña primero y luego configura biometría en Ajustes.', '');
+      } catch {}
+    });
+  }
+
+  // ── RECOVERY ──
+  function initRecovery() {
+    on('btn-recovery-back', 'click', () => UI.setState('state-login'));
+    on('btn-recovery-verify', 'click', async () => {
+      const words = Recovery.getRecoveryWords('recovery-input-grid');
+      if (words.some(w => !w)) { UI.err('recovery-error', 'Completa las 12 palabras.'); return; }
+      const btn = $('btn-recovery-verify');
+      btn.disabled = true; btn.textContent = 'Verificando…';
+      try {
+        // Try to validate phrase by attempting decrypt
+        const blobs = await DB.get('crypto_blobs', 'blobs');
+        if (!blobs?.recoveryWrap) { UI.err('recovery-error', 'No hay datos de recuperación guardados.'); return; }
+        const header = { kdf: 'PBKDF2-SHA256', version: 2, iterations: 600000, salt: blobs.recoverySalt };
+        const rKek   = await Crypto.deriveKEK(words.join(' '), blobs.recoverySalt);
+        try {
+          await Crypto.decrypt(rKek, blobs.recoveryWrap, Crypto.buildAAD(header, 'recovery'));
+        } catch { UI.err('recovery-error', 'Frase incorrecta. Verifica las palabras.'); return; }
+        State._pendingRecoveryWords = words;
+        UI.err('recovery-error', '');
+        UI.setState('state-new-password');
+        const npi = $('new-pw-input'); if (npi) { npi.value = ''; npi.focus(); }
+        const npc = $('new-pw-confirm'); if (npc) npc.value = '';
+      } finally {
+        btn.disabled = false; btn.textContent = 'Verificar';
+      }
+    });
+
+    on('btn-new-pw-save', 'click', async () => {
+      const pwd  = $('new-pw-input')?.value;
+      const conf = $('new-pw-confirm')?.value;
+      if (!pwd || pwd.length < 10) { UI.err('new-pw-error', 'Mínimo 10 caracteres.'); return; }
+      if (pwd !== conf)            { UI.err('new-pw-error', 'Las contraseñas no coinciden.'); return; }
+      const btn = $('btn-new-pw-save');
+      btn.disabled = true; btn.textContent = 'Guardando…';
+      try {
+        const dek = await Recovery.resetPassword(State._pendingRecoveryWords, pwd);
+        State._pendingRecoveryWords = null;
+        const result = await Crypto.verifyPassword(pwd);
+        if (result) await enterApp(result.dek, result.kek, result.user);
+        else        UI.err('new-pw-error', 'Error inesperado. Intenta de nuevo.');
+      } catch (e) {
+        UI.err('new-pw-error', e.message);
+      } finally {
+        btn.disabled = false; btn.textContent = 'Guardar contraseña';
+      }
+    });
+  }
+
+  // ── VAULT — Entry rendering ──
+  const ICONS = {
+    login: `<svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`,
+    card:  `<svg viewBox="0 0 24 24"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>`,
+    note:  `<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`,
+    identity: `<svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
+  };
+  const TYPE_CLASS = { login: '', card: 'card-type', note: 'note-type', identity: 'id-type' };
+
+  function entryTitle(e) {
+    if (e.type === 'login')    return e.name || e.username || 'Login';
+    if (e.type === 'card')     return e.name || 'Tarjeta';
+    if (e.type === 'note')     return e.title || 'Nota';
+    if (e.type === 'identity') return `${e.firstName || ''} ${e.lastName || ''}`.trim() || 'Identidad';
+    return 'Entrada';
+  }
+  function entrySub(e) {
+    if (e.type === 'login')    return e.username || e.url || '';
+    if (e.type === 'card')     return e.number ? '•••• ' + e.number.slice(-4) : '';
+    if (e.type === 'note')     return '';
+    if (e.type === 'identity') return e.email || '';
+    return '';
+  }
+
+  function renderEntries() {
+    const grid = $('entries-grid'); const empty = $('empty-state');
+    if (!grid) return;
+    const q    = $('search-input')?.value?.toLowerCase() || '';
+    const cat  = State.currentCat;
+    const list = State.entries.filter(e => {
+      if (cat !== 'all' && e.type !== cat) return false;
+      if (!q) return true;
+      return (entryTitle(e) + entrySub(e)).toLowerCase().includes(q);
+    });
+    if (!list.length) {
+      grid.innerHTML = ''; grid.classList.add('hidden'); empty?.classList.remove('hidden');
+      return;
+    }
+    grid.classList.remove('hidden'); empty?.classList.add('hidden');
+    grid.innerHTML = list.map(e => `
+      <div class="entry-card" data-id="${e.id}">
+        <div class="entry-card-header">
+          <div class="entry-icon ${TYPE_CLASS[e.type] || ''}">${ICONS[e.type] || ''}</div>
+          <div>
+            <div class="entry-name">${escHtml(entryTitle(e))}</div>
+            <div class="entry-sub">${escHtml(entrySub(e))}</div>
+          </div>
+        </div>
+      </div>`).join('');
+    grid.querySelectorAll('.entry-card').forEach(card => {
+      card.addEventListener('click', () => openViewModal(card.dataset.id));
+    });
+  }
+
+  function escHtml(s) {
+    return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function initVaultView() {
+    on('search-input', 'input', renderEntries);
+    $('category-tabs')?.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        $('category-tabs').querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        State.currentCat = tab.dataset.cat;
+        renderEntries();
       });
     });
-    if (!pw) return;
-    try {
-      $('btn-register-biometric').textContent = 'Registrando…';
-      $('btn-register-biometric').disabled = true;
-      await Biometric.register(pw);
-      const mode = $('biometric-mode-select').value;
-      Biometric.setMode(mode);
-      $('biometric-register-row').classList.add('hidden');
-      ReauthManager.invalidate(); // HADES-REAUTH: reenrol biométrico es evento de alto riesgo
-      showToast('¡Huella registrada exitosamente! 🔐');
-    } catch(e) {
-      showToast(e.name === 'NotAllowedError' ? 'Registro cancelado' : 'Error al registrar huella');
-    } finally {
-      $('btn-register-biometric').textContent = 'Registrar';
-      $('btn-register-biometric').disabled = false;
+    on('btn-add-entry',  'click', () => openEntryModal(null));
+    on('btn-add-first',  'click', () => openEntryModal(null));
+  }
+
+  // ── Entry Modal ──
+  function openEntryModal(id) {
+    State.currentEditId = id || null;
+    const entry = id ? State.entries.find(e => e.id === id) : null;
+    const $$ = UI.$;
+    $$('modal-entry-title').textContent = entry ? 'Editar entrada' : 'Nueva entrada';
+    const type = entry?.type || 'login';
+    $$('entry-type').value = type;
+    showFieldsForType(type);
+    if (entry) populateEntryForm(entry);
+    else clearEntryForm();
+    UI.showModal('modal-entry');
+  }
+
+  function showFieldsForType(type) {
+    ['fields-login','fields-card','fields-note','fields-identity'].forEach(id => UI.hide(id));
+    UI.show(`fields-${type}`);
+  }
+
+  function clearEntryForm() {
+    ['f-name','f-url','f-username','f-password','f-notes',
+     'c-name','c-number','c-expiry','c-cvv','c-notes',
+     'n-title','n-content','i-first','i-last','i-email','i-phone','i-address'
+    ].forEach(id => { const e = UI.$(id); if (e) e.value = ''; });
+  }
+
+  function populateEntryForm(e) {
+    const set = (id, v) => { const el = UI.$(id); if (el) el.value = v || ''; };
+    if (e.type === 'login') {
+      set('f-name', e.name); set('f-url', e.url); set('f-username', e.username); set('f-password', e.password); set('f-notes', e.notes);
+    } else if (e.type === 'card') {
+      set('c-name', e.name); set('c-number', e.number); set('c-expiry', e.expiry); set('c-cvv', e.cvv); set('c-notes', e.notes);
+    } else if (e.type === 'note') {
+      set('n-title', e.title); set('n-content', e.content);
+    } else if (e.type === 'identity') {
+      set('i-first', e.firstName); set('i-last', e.lastName); set('i-email', e.email); set('i-phone', e.phone); set('i-address', e.address);
     }
-  });
-}
-// ── REGISTER SERVICE WORKER ───────────────────────────
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  });
-  // El SW notifica con SW_UPDATED cuando hay una nueva versión activa.
-  // Solo recargamos si la app está en la pantalla de unlock (estado seguro sin datos en vuelo).
-  navigator.serviceWorker.addEventListener('message', e => {
-    if (e.data?.type === 'SW_UPDATED' && document.body.dataset.page === 'unlock') {
-      location.reload();
+  }
+
+  function collectEntryForm(type) {
+    const v = id => UI.$(id)?.value?.trim() || '';
+    if (type === 'login')    return { type, name: v('f-name'), url: v('f-url'), username: v('f-username'), password: v('f-password'), notes: v('f-notes') };
+    if (type === 'card')     return { type, name: v('c-name'), number: v('c-number'), expiry: v('c-expiry'), cvv: v('c-cvv'), notes: v('c-notes') };
+    if (type === 'note')     return { type, title: v('n-title'), content: v('n-content') };
+    if (type === 'identity') return { type, firstName: v('i-first'), lastName: v('i-last'), email: v('i-email'), phone: v('i-phone'), address: v('i-address') };
+  }
+
+  function initEntryModal() {
+    on('entry-type', 'change', () => showFieldsForType(UI.$('entry-type').value));
+    on('modal-entry-close',  'click', () => UI.hideModal('modal-entry'));
+    on('modal-entry-cancel', 'click', () => UI.hideModal('modal-entry'));
+    on('btn-gen-quick', 'click', () => {
+      const pwd = generatePassword(16, true, true, true, true);
+      const el  = UI.$('f-password'); if (el) el.value = pwd;
+    });
+    on('modal-entry-save', 'click', async () => {
+      const type  = UI.$('entry-type').value;
+      const data  = collectEntryForm(type);
+      if (State.currentEditId) {
+        const idx = State.entries.findIndex(e => e.id === State.currentEditId);
+        if (idx >= 0) State.entries[idx] = { ...State.entries[idx], ...data };
+      } else {
+        State.entries.push({ id: uid(), createdAt: Date.now(), ...data });
+      }
+      await Crypto.saveVault(State.dek, State.entries);
+      UI.hideModal('modal-entry');
+      renderEntries();
+      UI.toast(State.currentEditId ? 'Entrada actualizada' : 'Entrada guardada', 'success');
+    });
+  }
+
+  // ── View Modal ──
+  function openViewModal(id) {
+    const entry = State.entries.find(e => e.id === id);
+    if (!entry) return;
+    State.currentEditId = id;
+    const title = UI.$('view-entry-title');
+    const body  = UI.$('view-entry-body');
+    if (title) title.textContent = entryTitle(entry);
+    if (body)  body.innerHTML = buildViewBody(entry);
+    body?.querySelectorAll('[data-copy]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const field = btn.dataset.copy;
+        if (field === 'cvv' || field === 'number') {
+          Reauth.require('ver datos sensibles de tarjeta').then(ok => {
+            if (ok) UI.copyToClipboard(entry[field] || '', field.toUpperCase());
+          });
+        } else {
+          UI.copyToClipboard(entry[field] || '', btn.dataset.label || field);
+        }
+      });
+    });
+    const SVG_EYE    = `<svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
+    const SVG_EYEOFF = `<svg viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`;
+    body?.querySelectorAll('[data-reveal]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const field   = btn.dataset.reveal;
+        const visible = btn.dataset.visible === 'true';
+        const span    = body.querySelector(`[data-field="${field}"]`);
+        if (!span) return;
+        if (!visible) {
+          span.textContent     = span.dataset.actual;
+          btn.innerHTML        = SVG_EYEOFF;
+          btn.dataset.visible  = 'true';
+        } else {
+          span.textContent     = '••••';
+          btn.innerHTML        = SVG_EYE;
+          btn.dataset.visible  = 'false';
+        }
+      });
+    });
+    UI.showModal('modal-view');
+  }
+
+  function buildViewBody(e) {
+    const SVG_COPY = `<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+    const SVG_EYE  = `<svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
+    const SVG_EYEOFF = `<svg viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`;
+    const row = (label, val, field, sensitive = false) => {
+      if (!val) return '';
+      const escaped = escHtml(val);
+      const display = sensitive ? '••••' : escaped;
+      const eyeBtn  = sensitive
+        ? `<button class="icon-btn" data-reveal="${field}" data-visible="false" title="Mostrar/ocultar">${SVG_EYE}</button>`
+        : '';
+      return `<div class="view-row"><span class="view-label">${label}</span><div class="view-val-wrap"><span class="view-val" data-field="${field}" data-actual="${escaped}">${display}</span>${eyeBtn}<button class="icon-btn" data-copy="${field}" data-label="${label}">${SVG_COPY}</button></div></div>`;
+    };
+    if (e.type === 'login')    return row('Sitio', e.name, 'name') + row('URL', e.url, 'url') + row('Usuario', e.username, 'username') + row('Contraseña', e.password, 'password', true) + row('Notas', e.notes, 'notes');
+    if (e.type === 'card')     return row('Nombre', e.name, 'name') + row('Número', e.number, 'number', true) + row('Vencimiento', e.expiry, 'expiry') + row('CVV', e.cvv, 'cvv', true) + row('Notas', e.notes, 'notes');
+    if (e.type === 'note')     return row('Título', e.title, 'title') + row('Contenido', e.content, 'content');
+    if (e.type === 'identity') return row('Nombre', e.firstName, 'firstName') + row('Apellido', e.lastName, 'lastName') + row('Email', e.email, 'email') + row('Teléfono', e.phone, 'phone') + row('Dirección', e.address, 'address');
+    return '';
+  }
+
+  function initViewModal() {
+    on('modal-view-close', 'click', () => UI.hideModal('modal-view'));
+    on('btn-edit-entry', 'click', () => { UI.hideModal('modal-view'); openEntryModal(State.currentEditId); });
+    on('btn-delete-entry', 'click', () => {
+      UI.hideModal('modal-view');
+      const entry = State.entries.find(e => e.id === State.currentEditId);
+      if (!entry) return;
+      UI.$('confirm-title').textContent = 'Eliminar entrada';
+      UI.$('confirm-msg').textContent   = `¿Eliminar "${escHtml(entryTitle(entry))}"? Esta acción no se puede deshacer.`;
+      UI.showModal('modal-confirm');
+      UI.$('confirm-ok').onclick = async () => {
+        State.entries = State.entries.filter(e => e.id !== State.currentEditId);
+        await Crypto.saveVault(State.dek, State.entries);
+        UI.hideModal('modal-confirm');
+        renderEntries();
+        UI.toast('Entrada eliminada', 'success');
+      };
+      UI.$('confirm-cancel').onclick = () => UI.hideModal('modal-confirm');
+    });
+  }
+
+  // ── Generator ──
+  function generatePassword(len, upper, lower, numbers, symbols) {
+    let chars = '';
+    if (upper)   chars += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    if (lower)   chars += 'abcdefghijklmnopqrstuvwxyz';
+    if (numbers) chars += '0123456789';
+    if (symbols) chars += '!@#$%^&*()_+-=[]{}|;:,.<>?';
+    if (!chars) chars = 'abcdefghijklmnopqrstuvwxyz';
+    const arr = crypto.getRandomValues(new Uint32Array(len));
+    return Array.from(arr).map(n => chars[n % chars.length]).join('');
+  }
+
+  function initGenerator() {
+    const gen = () => {
+      const len = parseInt(UI.$('gen-length')?.value || '16');
+      const pwd = generatePassword(
+        len,
+        UI.$('use-upper')?.checked,
+        UI.$('use-lower')?.checked,
+        UI.$('use-numbers')?.checked,
+        UI.$('use-symbols')?.checked
+      );
+      const out = UI.$('gen-output'); if (out) out.textContent = pwd;
+      const s   = UI.passwordStrength(pwd);
+      const sf  = UI.$('gen-strength-fill'); if (sf) { sf.style.width = s.pct + '%'; sf.style.background = s.color; }
+      const sl  = UI.$('gen-strength-label'); if (sl) sl.textContent = s.label;
+    };
+    on('btn-generate', 'click', gen);
+    on('gen-length', 'input', () => { const lv = UI.$('len-val'); if (lv) lv.textContent = UI.$('gen-length').value; });
+    on('btn-copy-gen', 'click', () => {
+      const txt = UI.$('gen-output')?.textContent;
+      if (txt && txt !== 'Haz clic en generar') UI.copyToClipboard(txt, 'Contraseña');
+    });
+  }
+
+  // ── Settings ──
+  function updateBioSettings() {
+    Biometric.hasCredential().then(has => {
+      const lbl = UI.$('bio-status-label');
+      const reg = UI.$('btn-bio-register');
+      const rem = UI.$('btn-bio-remove');
+      if (lbl) { lbl.textContent = has ? 'Configurado' : 'No configurado'; lbl.classList.toggle('active', has); }
+      if (reg) reg.classList.toggle('hidden', has);
+      if (rem) rem.classList.toggle('hidden', !has);
+    });
+  }
+
+  function initSettings() {
+    on('btn-change-master', 'click', () => {
+      ['cm-current','cm-new','cm-confirm'].forEach(id => { const e = UI.$(id); if (e) e.value = ''; });
+      UI.hide('cm-error');
+      UI.showModal('modal-change-master');
+    });
+    on('modal-cm-close',  'click', () => UI.hideModal('modal-change-master'));
+    on('modal-cm-cancel', 'click', () => UI.hideModal('modal-change-master'));
+    on('btn-cm-save', 'click', async () => {
+      const cur  = UI.$('cm-current')?.value;
+      const nw   = UI.$('cm-new')?.value;
+      const conf = UI.$('cm-confirm')?.value;
+      if (!nw || nw.length < 10) { UI.err('cm-error', 'Mínimo 10 caracteres.'); return; }
+      if (nw !== conf)           { UI.err('cm-error', 'Las contraseñas no coinciden.'); return; }
+      const btn = UI.$('btn-cm-save');
+      btn.disabled = true; btn.textContent = 'Actualizando…';
+      try {
+        const { newKek } = await Crypto.changeMasterPassword(cur, nw);
+        State.kek = newKek;
+        Reauth.invalidate();
+        UI.hideModal('modal-change-master');
+        UI.toast('Contraseña actualizada', 'success');
+      } catch (e) {
+        UI.err('cm-error', e.message);
+      } finally {
+        btn.disabled = false; btn.textContent = 'Cambiar';
+      }
+    });
+
+    on('btn-bio-register', 'click', async () => {
+      if (!Biometric.isSupported()) { UI.toast('WebAuthn no disponible en este dispositivo', 'error'); return; }
+      const ok = await Reauth.require('registrar huella dactilar');
+      if (!ok) return;
+      try {
+        if (!State.kek) { UI.toast('Necesitas iniciar sesión con contraseña para registrar la huella.', ''); return; }
+        await Biometric.register(State.dek, State.kek);
+        UI.toast('Huella registrada correctamente', 'success');
+        updateBioSettings();
+      } catch (e) { UI.toast(e.message, 'error'); }
+    });
+
+    on('btn-bio-remove', 'click', async () => {
+      const ok = await Reauth.require('eliminar huella dactilar');
+      if (!ok) return;
+      await Biometric.unregister();
+      UI.toast('Huella eliminada', 'success');
+      updateBioSettings();
+    });
+
+    on('btn-export', 'click', () => Backup.exportVault().catch(e => UI.toast(e.message, 'error')));
+
+    on('btn-import', 'click', () => UI.$('import-file')?.click());
+    on('import-file', 'change', async e => {
+      const file = e.target.files?.[0]; if (!file) return;
+      const ok = await Reauth.require('importar backup');
+      if (!ok) { e.target.value = ''; return; }
+      try {
+        State._importData = await Backup.loadFile(file);
+        UI.hide('import-pw-error');
+        UI.$('import-pw-input').value = '';
+        UI.showModal('modal-import-pw');
+      } catch (err) { UI.toast(err.message, 'error'); }
+      e.target.value = '';
+    });
+    on('import-pw-cancel', 'click', () => { UI.hideModal('modal-import-pw'); State._importData = null; });
+    on('import-pw-ok', 'click', async () => {
+      const pwd = UI.$('import-pw-input')?.value;
+      if (!pwd) { UI.err('import-pw-error', 'Ingresa la contraseña del backup.'); return; }
+      const btn = UI.$('import-pw-ok'); btn.disabled = true; btn.textContent = 'Importando…';
+      try {
+        await Backup.promoteImport(pwd);
+        UI.hideModal('modal-import-pw');
+        lock();
+        UI.toast('Backup importado. Inicia sesión con tu contraseña.', 'success');
+      } catch (e) {
+        UI.err('import-pw-error', e.message);
+      } finally {
+        btn.disabled = false; btn.textContent = 'Importar';
+      }
+    });
+
+    on('btn-delete-vault', 'click', async () => {
+      const ok = await Reauth.require('eliminar bóveda permanentemente');
+      if (!ok) return;
+      UI.$('confirm-title').textContent = 'Eliminar bóveda';
+      UI.$('confirm-msg').textContent   = 'Esta acción eliminará TODOS tus datos permanentemente. No hay vuelta atrás.';
+      UI.showModal('modal-confirm');
+      UI.$('confirm-ok').onclick = async () => {
+        await DB.clear('kdf_header'); await DB.clear('crypto_blobs'); await DB.clear('vault');
+        await DB.clear('staging'); await DB.clear('import_staging');
+        localStorage.removeItem('hades_bio_mode');
+        UI.hideModal('modal-confirm');
+        lock();
+        UI.toast('Bóveda eliminada.', 'success');
+        UI.setState('state-loading');
+        await init();
+      };
+      UI.$('confirm-cancel').onclick = () => UI.hideModal('modal-confirm');
+    });
+  }
+
+  // ── Reauth Modal ──
+  function initReauth() {
+    on('reauth-cancel', 'click', () => {
+      UI.hideModal('modal-reauth');
+      if (State.reauthResolve) { State.reauthResolve(false); State.reauthResolve = null; }
+    });
+    on('reauth-ok', 'click', async () => {
+      const pwd = UI.$('reauth-password')?.value;
+      const btn = UI.$('reauth-ok'); btn.disabled = true; btn.textContent = 'Verificando…';
+      try {
+        const result = await Crypto.verifyPassword(pwd);
+        if (!result) { UI.show('reauth-error'); return; }
+        Reauth.confirm();
+        UI.hideModal('modal-reauth');
+        if (State.reauthResolve) { State.reauthResolve(true); State.reauthResolve = null; }
+      } finally {
+        btn.disabled = false; btn.textContent = 'Verificar';
+      }
+    });
+    on('reauth-password', 'keydown', e => { if (e.key === 'Enter') UI.$('reauth-ok')?.click(); });
+  }
+
+  // ── CSS for view rows (injected) ──
+  function injectViewRowStyles() {
+    const style = document.createElement('style');
+    style.textContent = `
+      .view-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);}
+      .view-row:last-child{border-bottom:none;}
+      .view-label{font-size:.8125rem;color:var(--text-2);min-width:90px;}
+      .view-val-wrap{display:flex;align-items:center;gap:8px;flex:1;justify-content:flex-end;}
+      .view-val{font-size:.875rem;color:var(--text);word-break:break-all;text-align:right;}
+    `;
+    document.head.appendChild(style);
+  }
+
+  // ── Init ──
+  async function init() {
+    initParallax();
+    initTheme();
+    initEyeButtons();
+    injectViewRowStyles();
+    const hasVault = await DB.hasVault();
+    if (hasVault) {
+      const blobs = await DB.get('crypto_blobs', 'blobs');
+      const header = await DB.get('kdf_header', 'header');
+      const loginUsernameEl = UI.$('login-username');
+      if (loginUsernameEl) loginUsernameEl.textContent = blobs?.user || 'Usuario';
+      const hasBio = !!(blobs?.bioCredentialId) && Biometric.isSupported() && Biometric.getMode() === 'both';
+      if (hasBio) UI.show('btn-biometric-login');
+      UI.setState('state-login');
+      setTimeout(() => { UI.$('login-password')?.focus(); }, 100);
+    } else {
+      UI.setState('state-setup-1');
+      setTimeout(() => { UI.$('reg-name')?.focus(); }, 100);
     }
-  });
-}
-// ── BOOT ─────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  const savedTheme = localStorage.getItem('hades_theme') || 'dark';
-  applyTheme(savedTheme);
-  bindEvents();
-  initUnlockScreen();
-  on(document.querySelector('.nav-item[data-view="generator"]'), 'click', renderGenerator);
-});
+    initSetup();
+    initLogin();
+    initRecovery();
+    initVaultView();
+    initEntryModal();
+    initViewModal();
+    initGenerator();
+    initSettings();
+    initReauth();
+    initSidebar();
+    setTimeout(initTilt, 200);
+
+    // SW message listener
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+      navigator.serviceWorker.addEventListener('message', e => {
+        if (e.data?.type === 'SW_UPDATED' && document.body.dataset.page === 'unlock') location.reload();
+      });
+    }
+  }
+
+  return { init };
+})();
+
+// ─────────────────────────────────────────────
+// HADES-V2-INIT
+// ─────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => App.init());

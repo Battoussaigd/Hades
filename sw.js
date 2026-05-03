@@ -1,8 +1,8 @@
 /* ═══════════════════════════════════════════
-   HADES 2.1 — Service Worker (Offline First)
+   HADES V2 — Service Worker (Offline First)
    ═══════════════════════════════════════════ */
 
-const CACHE_NAME = 'hades-v2.1.24';
+const CACHE_NAME = 'hades-v2.0.1';
 const ASSETS = [
   '/',
   '/index.html',
@@ -11,34 +11,27 @@ const ASSETS = [
   '/manifest.json',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
-  'https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600&display=swap',
 ];
 
-// Install: cache all assets and activate immediately
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => {
-      return Promise.allSettled(ASSETS.map(url => cache.add(url).catch(() => {})));
-    }).then(() => self.skipWaiting()) // Activa el nuevo SW sin esperar
+    caches.open(CACHE_NAME)
+      .then(cache => Promise.allSettled(ASSETS.map(url => cache.add(url).catch(() => {}))))
+      .then(() => self.skipWaiting())
   );
 });
 
-// Activate: clean old caches, tomar control y recargar la app
 self.addEventListener('activate', event => {
   event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
-    ).then(() => self.clients.claim()) // Toma control de todos los clientes
-     .then(() => {
-       // Notifica a todas las ventanas abiertas para que recarguen cuando lo decidan
-       return self.clients.matchAll({ type: 'window' }).then(clients => {
-         clients.forEach(client => client.postMessage({ type: 'SW_UPDATED' }));
-       });
-     })
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
+      .then(() => self.clients.matchAll({ type: 'window' })
+        .then(clients => clients.forEach(c => c.postMessage({ type: 'SW_UPDATED' })))
+      )
   );
 });
 
-// Fetch: Cache First strategy
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
   if (!event.request.url.startsWith('http')) return;
@@ -52,9 +45,7 @@ self.addEventListener('fetch', event => {
         caches.open(CACHE_NAME).then(c => c.put(event.request, clone));
         return response;
       }).catch(() => {
-        if (event.request.mode === 'navigate') {
-          return caches.match('/index.html');
-        }
+        if (event.request.mode === 'navigate') return caches.match('/index.html');
       });
     })
   );
