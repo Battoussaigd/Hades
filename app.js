@@ -991,6 +991,7 @@ async function initUnlockScreen() {
         $('setup-step-3').classList.remove('hidden');
         Recovery.renderPhrase(phrase, 'recovery-phrase-display');
       } catch (e) {
+        console.error('Setup error:', e);
         err.textContent = 'Error al crear bóveda';
         err.classList.remove('hidden');
         $('btn-setup').disabled = false;
