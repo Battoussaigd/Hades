@@ -878,3 +878,21 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 2; stroke-
 
 /* Nombre en unlock */
 #unlock-username { color: var(--accent); }
+
+/* ═══════════════════════════════════════════
+   REAUTH MODAL
+   ═══════════════════════════════════════════ */
+.reauth-overlay .modal-card {
+  max-width: 380px;
+}
+.reauth-overlay .modal-footer {
+  flex-direction: column;
+  gap: 8px;
+}
+.reauth-overlay .btn-biometric {
+  width: 100%;
+  margin-top: 0;
+}
+
+/* Nombre de usuario en unlock */
+#unlock-username { color: var(--accent); font-weight: 700; }

@@ -12,6 +12,42 @@
   <title>Hades 2.1</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <!--
+    CONTENT SECURITY POLICY — HADES 2.1
+    ══════════════════════════════════════════════════════════════
+    NOTA: Esta CSP via <meta> es una medida de defensa en profundidad.
+    LIMITACIÓN IMPORTANTE: El meta tag CSP no puede bloquear:
+      - Navegación (form-action, frame-ancestors)
+      - report-uri
+      - Cabeceras de respuesta (X-Frame-Options, etc.)
+    Para protección completa se recomienda configurar el header HTTP
+    Content-Security-Policy en Netlify (_headers file).
+    ══════════════════════════════════════════════════════════════
+    Política:
+      default-src 'none'            → bloquear todo por defecto
+      script-src 'self'             → solo app.js local, sin inline, sin eval
+      style-src 'self' fonts.googleapis.com → CSS local + Google Fonts CSS
+      font-src fonts.gstatic.com    → solo archivos de fuente de Google
+      img-src 'self' data:          → iconos locales + data URIs para PWA
+      connect-src 'none'            → sin conexiones de red desde JS
+      object-src 'none'             → bloquear plugins (Flash, etc.)
+      frame-src 'none'              → sin iframes
+      base-uri 'self'               → evitar base tag injection
+      form-action 'none'            → sin envío de formularios externos
+    ══════════════════════════════════════════════════════════════
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'none';
+    script-src 'self';
+    style-src 'self' https://fonts.googleapis.com;
+    font-src https://fonts.gstatic.com;
+    img-src 'self' data:;
+    connect-src 'none';
+    object-src 'none';
+    frame-src 'none';
+    base-uri 'self';
+    form-action 'none';
+  " />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
@@ -250,9 +286,7 @@
           <span>Ayuda</span>
         </button>
       </div>
-      <div class="home-footer">
-        <span>© 2026 Claudio González Díaz</span>      
-      </div>
+
     </div>
   </div>
 
@@ -452,51 +486,91 @@
               <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             </div>
             <div>
-              <h2 class="info-hero-title">Seguridad de nivel militar</h2>
-              <p class="info-hero-sub">Hades utiliza el mismo estándar de cifrado empleado por gobiernos, ejércitos, instituciones financieras y agencias de inteligencia en todo el mundo, pero, optimizada con IA.</p>
+              <h2 class="info-hero-title">Seguridad auditada y robusta</h2>
+              <p class="info-hero-sub">Hades implementa criptografía de nivel profesional con arquitectura KEK/DEK, autenticación en dos factores, frase de recuperación y protección contra ataques XSS — todo en tu dispositivo, sin servidores.</p>
             </div>
           </div>
 
           <div class="glass-card settings-card">
-            <h2>🔐 ¿Por qué es segura?</h2>
+            <h2>🔐 Arquitectura de seguridad</h2>
             <div class="help-block">
               <div class="help-item">
-                <div class="help-item-title">Cifrado AES-256-GCM</div>
-                <div class="help-item-desc">El estándar de cifrado más avanzado del mundo. AES-256 es tan robusto que, con la tecnología actual, descifrar una sola contraseña tomaría más tiempo que la edad del universo. Es el mismo cifrado utilizado por la NSA, la OTAN y los principales bancos del planeta.</div>
+                <div class="help-item-title">Cifrado AES-256-GCM con separación de claves (KEK/DEK)</div>
+                <div class="help-item-desc">Hades usa dos capas de claves: una KEK (Key Encryption Key) derivada de tu contraseña maestra que protege a una DEK (Data Encryption Key) aleatoria, la cual cifra tus datos. Esto permite rotar la contraseña sin re-cifrar todo el vault y protege mejor tus datos ante acceso físico al dispositivo.</div>
               </div>
               <div class="help-item">
-                <div class="help-item-title">PBKDF2 con 310.000 iteraciones</div>
-                <div class="help-item-desc">Tu contraseña maestra pasa por 310.000 rondas de transformación antes de convertirse en la llave de cifrado. Esto hace que los ataques de fuerza bruta sean prácticamente imposibles, incluso con supercomputadoras.</div>
+                <div class="help-item-title">PBKDF2-HMAC-SHA256 calibrado por dispositivo (OWASP)</div>
+                <div class="help-item-desc">Tu contraseña maestra pasa por entre 600.000 y 1.000.000 de iteraciones — calibradas automáticamente para que el proceso tome entre 250ms y 500ms en tu dispositivo específico. Esto hace que los ataques de fuerza bruta sean extremadamente costosos incluso con hardware especializado.</div>
               </div>
               <div class="help-item">
-                <div class="help-item-title">Cero conocimiento (Zero Knowledge)</div>
-                <div class="help-item-desc">Ni Hades, ni ningún servidor, ni nadie en el mundo conoce tu contraseña maestra. Absolutamente nadie puede acceder a tus datos, ni siquiera el desarrollador de la app. Si olvidas tu contraseña, no hay recuperación posible.</div>
+                <div class="help-item-title">Metadatos autenticados (AAD)</div>
+                <div class="help-item-desc">Cada blob cifrado usa Additional Authenticated Data (AAD) que vincula el ciphertext a su header KDF. Si alguien intenta manipular los parámetros de cifrado en el almacenamiento, el descifrado falla automáticamente — los datos no pueden ser re-enrutados ni modificados silenciosamente.</div>
               </div>
               <div class="help-item">
-                <div class="help-item-title">Todo ocurre en tu dispositivo</div>
-                <div class="help-item-desc">Tus contraseñas nunca salen de tu celular o computador. No hay servidores externos, no hay nube, no hay sincronización remota. Tu información vive exclusivamente en tu dispositivo, cifrada.</div>
+                <div class="help-item-title">Zero Knowledge — todo en tu dispositivo</div>
+                <div class="help-item-desc">Ni Hades, ni ningún servidor, ni nadie externo conoce tu contraseña maestra ni tus datos. No hay servidores externos, no hay nube propia, no hay telemetría. Tu bóveda vive cifrada solo en tu dispositivo.</div>
               </div>
             </div>
           </div>
 
           <div class="glass-card settings-card">
-            <h2>📖 ¿Cómo usar Hades?</h2>
+            <h2>🔑 Acceso y autenticación</h2>
             <div class="help-block">
               <div class="help-item">
-                <div class="help-item-title">Bóveda</div>
-                <div class="help-item-desc">Aquí viven todas tus entradas. Puedes guardar logins, tarjetas de crédito, notas seguras e identidades. Toca cualquier entrada para ver sus detalles o editarla.</div>
+                <div class="help-item-title">Tres modos de acceso</div>
+                <div class="help-item-desc">Puedes configurar tu acceso en Ajustes: solo contraseña maestra, solo huella dactilar (más cómodo), o huella + contraseña para máxima seguridad. Puedes cambiar el modo en cualquier momento — requiere verificación de identidad previa.</div>
               </div>
               <div class="help-item">
-                <div class="help-item-title">Generador de contraseñas</div>
-                <div class="help-item-desc">Crea contraseñas aleatorias y ultra seguras con un solo toque. Ajusta la longitud y los tipos de caracteres. Nunca más uses "123456" o tu fecha de nacimiento.</div>
+                <div class="help-item-title">Huella dactilar (WebAuthn)</div>
+                <div class="help-item-desc">La autenticación biométrica usa el estándar WebAuthn. Tu huella nunca sale del sensor del dispositivo — Hades solo recibe una confirmación de identidad, y con ella descifra automáticamente tu contraseña maestra. Es tan seguro como usar la contraseña directamente.</div>
               </div>
               <div class="help-item">
-                <div class="help-item-title">Backup y restauración</div>
-                <div class="help-item-desc">Desde Ajustes puedes exportar tu bóveda como archivo JSON cifrado. Guárdalo en un lugar seguro — si pierdes tu dispositivo, podrás restaurar todo importando ese archivo.</div>
+                <div class="help-item-title">Reautenticación para acciones sensibles</div>
+                <div class="help-item-desc">Exportar, importar, cambiar contraseña, gestionar huella o ver datos de tarjeta completos requieren que verifiques tu identidad nuevamente, incluso si la sesión está abierta. Esta ventana de verificación dura 120 segundos y se invalida automáticamente tras eventos críticos.</div>
               </div>
               <div class="help-item">
-                <div class="help-item-title">Auto-bloqueo</div>
-                <div class="help-item-desc">Configura el tiempo de inactividad tras el cual Hades se bloquea automáticamente. Recomendamos 5 minutos para mayor seguridad.</div>
+                <div class="help-item-title">Límite de intentos fallidos</div>
+                <div class="help-item-desc">Tras 3 intentos fallidos de contraseña, el acceso queda bloqueado y debes usar tu frase de recuperación de 12 palabras para restablecer el acceso.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="glass-card settings-card">
+            <h2>🛡️ Frase de recuperación</h2>
+            <div class="help-block">
+              <div class="help-item">
+                <div class="help-item-title">12 palabras que son tu llave maestra</div>
+                <div class="help-item-desc">Al registrarte, Hades genera automáticamente 12 palabras aleatorias. Anótalas en papel y guárdalas en un lugar seguro — son tu único recurso si olvidas tu contraseña maestra. Funcionan como las wallets de Bitcoin: sin ellas no hay recuperación posible.</div>
+              </div>
+              <div class="help-item">
+                <div class="help-item-title">Almacenamiento irreversible</div>
+                <div class="help-item-desc">Las 12 palabras nunca se guardan en el dispositivo. Solo se almacena un verificador criptográfico derivado con PBKDF2 y una sal aleatoria única — es imposible reconstruir las palabras originales desde ese verificador.</div>
+              </div>
+              <div class="help-item">
+                <div class="help-item-title">Qué ocurre al recuperar acceso</div>
+                <div class="help-item-desc">Si usas la frase de recuperación, podrás crear una nueva contraseña maestra. La bóveda anterior no puede recuperarse sin la contraseña original — se iniciará una bóveda nueva y se te pedirá anotar una nueva frase de recuperación.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="glass-card settings-card">
+            <h2>📦 Backup y restauración</h2>
+            <div class="help-block">
+              <div class="help-item">
+                <div class="help-item-title">Formato de backup v3.0 (cifrado)</div>
+                <div class="help-item-desc">El archivo de backup (.hades) contiene tu bóveda cifrada, la clave DEK cifrada con tu KEK, los parámetros KDF y el verificador de frase. Todos los datos sensibles van cifrados — sin tu contraseña maestra, el backup es ilegible para cualquiera.</div>
+              </div>
+              <div class="help-item">
+                <div class="help-item-title">Restauración segura con rollback</div>
+                <div class="help-item-desc">Al importar un backup, Hades toma una fotografía del estado actual de tu bóveda antes de escribir nada. Si la importación falla en cualquier punto, tu bóveda anterior se restaura íntegramente — nunca perderás acceso a tus datos por una importación fallida.</div>
+              </div>
+              <div class="help-item">
+                <div class="help-item-title">Límite y validación del archivo</div>
+                <div class="help-item-desc">Hades valida estrictamente el archivo antes de importar: tamaño máximo 512KB, formato JSON válido, campos obligatorios, base64 válido y consistencia entre versión y parámetros KDF. Un backup corrupto o manipulado es rechazado antes de escribir cualquier dato.</div>
+              </div>
+              <div class="help-item">
+                <div class="help-item-title">Haz backups regularmente</div>
+                <div class="help-item-desc">Exporta tu bóveda periódicamente desde Ajustes. Guarda el archivo en un lugar seguro — correo personal, disco externo o USB. Si pierdes el dispositivo, el backup + tu contraseña maestra son suficientes para recuperar todo.</div>
               </div>
             </div>
           </div>
@@ -506,15 +580,19 @@
             <div class="help-block">
               <div class="help-item">
                 <div class="help-item-title">Elige una contraseña maestra fuerte</div>
-                <div class="help-item-desc">Usa al menos 12 caracteres mezclando mayúsculas, minúsculas, números y símbolos. Esta es la única contraseña que deberás recordar.</div>
+                <div class="help-item-desc">Usa al menos 12 caracteres mezclando mayúsculas, minúsculas, números y símbolos. Esta es la única contraseña que deberás recordar — no la escribas en papel junto a la frase de recuperación.</div>
               </div>
               <div class="help-item">
-                <div class="help-item-title">Haz backups regularmente</div>
-                <div class="help-item-desc">Exporta tu bóveda cada cierto tiempo y guarda el archivo en un lugar seguro como un disco externo o USB.</div>
+                <div class="help-item-title">Guarda la frase de recuperación separada de la contraseña</div>
+                <div class="help-item-desc">Si alguien obtiene ambas, tiene acceso completo. Guárdalas en lugares distintos — la frase en papel en casa, la contraseña en tu memoria o en un lugar diferente.</div>
               </div>
               <div class="help-item">
                 <div class="help-item-title">Usa contraseñas únicas para cada servicio</div>
-                <div class="help-item-desc">Nunca repitas contraseñas. Si un sitio es hackeado, las demás cuentas seguirán seguras. El generador de Hades te ayuda con esto.</div>
+                <div class="help-item-desc">Nunca repitas contraseñas. El generador de Hades crea contraseñas aleatorias y seguras en un toque — úsalo cada vez que crees una cuenta nueva.</div>
+              </div>
+              <div class="help-item">
+                <div class="help-item-title">Activa el auto-bloqueo</div>
+                <div class="help-item-desc">Configura un tiempo de inactividad corto en Ajustes — recomendamos 5 minutos. Si alguien toma tu celular desbloqueado, Hades se bloqueará automáticamente.</div>
               </div>
             </div>
           </div>
