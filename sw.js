@@ -2,7 +2,7 @@
    HADES 2.1 — Service Worker (Offline First)
    ═══════════════════════════════════════════ */
 
-const CACHE_NAME = 'hades-v2.1.21';
+const CACHE_NAME = 'hades-v2.1.22';
 const ASSETS = [
   '/',
   '/index.html',
@@ -11,7 +11,7 @@ const ASSETS = [
   '/manifest.json',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
-  'https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap',
+  'https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600&display=swap',
 ];
 
 // Install: cache all assets and activate immediately
@@ -30,9 +30,9 @@ self.addEventListener('activate', event => {
       Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
     ).then(() => self.clients.claim()) // Toma control de todos los clientes
      .then(() => {
-       // Notifica a todas las ventanas abiertas para que recarguen
+       // Notifica a todas las ventanas abiertas para que recarguen cuando lo decidan
        return self.clients.matchAll({ type: 'window' }).then(clients => {
-         clients.forEach(client => client.navigate(client.url));
+         clients.forEach(client => client.postMessage({ type: 'SW_UPDATED' }));
        });
      })
   );

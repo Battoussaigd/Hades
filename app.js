@@ -858,6 +858,7 @@ const State = {
   autoLockTimer: null,
   autoLockSeconds: 300,
   theme: 'dark',
+  _bioVerified: false,
 };
 // ── DOM HELPERS ───────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -1937,35 +1938,46 @@ async function changeMasterPassword() {
   if (newPw !== confirm) { err.textContent = 'Las contraseñas no coinciden'; err.classList.remove('hidden'); return; }
   const testKey = await Crypto.verifyPassword(current);
   if (!testKey) { err.textContent = 'Contraseña actual incorrecta'; err.classList.remove('hidden'); return; }
-  // HADES-REAUTH + Punto 5: rotación completa KEK + DEK en cambio de contraseña
-  // Nueva KEK (nueva salt + iteraciones calibradas) + nueva DEK aleatoria
-  const iterations = await calibrateKDF();
-  const newSalt = Crypto._newSalt();
-  const newHeader = { kdf: 'PBKDF2-SHA256', version: 3, iterations, salt: newSalt };
-  const aadV = Crypto._buildAAD(newHeader, 'vault');
-  const aadD = Crypto._buildAAD(newHeader, 'dek');
-  const aadM = Crypto._buildAAD(newHeader, 'verifier');
-  const newKEK = await Crypto.deriveKEK(newPw, newSalt, iterations);
-  const newDEK = await Crypto.generateDEK();
-  const newDEKRaw = await Crypto.exportDEK(newDEK);
-  const newDEKB64 = btoa(String.fromCharCode(...newDEKRaw));
-  const newDekEnc   = await Crypto._encrypt(newKEK, newDEKB64, aadD);
-  const newVaultEnc = await Crypto._encrypt(newDEK, State.entries, aadV);
-  const newVerifier = await Crypto._encrypt(newKEK, { ok: true, v: 3 }, aadM);
-  // Validar antes de escribir
-  const tDekB64 = await Crypto._decrypt(newKEK, newDekEnc, aadD);
-  const tDek = await Crypto.importDEK(Uint8Array.from(atob(tDekB64), c=>c.charCodeAt(0)));
-  const tVault = await Crypto._decrypt(tDek, newVaultEnc, aadV);
-  if (!Array.isArray(tVault)) throw new Error('Validación fallida');
-  // Escribir atómicamente
-  Crypto._saveKDFHeader(newHeader);
-  localStorage.setItem(Crypto.DEK_KEY, newDekEnc);
-  localStorage.setItem(Crypto.VAULT_KEY, newVaultEnc);
-  localStorage.setItem(Crypto.META_KEY, newVerifier);
-  State.cryptoKey = newDEK; // State.cryptoKey es ahora la DEK
-  $('modal-change-master').classList.add('hidden');
-  ReauthManager.invalidate(); // HADES-REAUTH: cambio de contraseña es evento de alto riesgo
-  showToast('Contraseña maestra actualizada');
+  const btn = $('btn-cm-save');
+  btn.disabled = true;
+  btn.textContent = 'Actualizando…';
+  try {
+    // HADES-REAUTH + Punto 5: rotación completa KEK + DEK en cambio de contraseña
+    // Nueva KEK (nueva salt + iteraciones calibradas) + nueva DEK aleatoria
+    const iterations = await calibrateKDF();
+    const newSalt = Crypto._newSalt();
+    const newHeader = { kdf: 'PBKDF2-SHA256', version: 3, iterations, salt: newSalt };
+    const aadV = Crypto._buildAAD(newHeader, 'vault');
+    const aadD = Crypto._buildAAD(newHeader, 'dek');
+    const aadM = Crypto._buildAAD(newHeader, 'verifier');
+    const newKEK = await Crypto.deriveKEK(newPw, newSalt, iterations);
+    const newDEK = await Crypto.generateDEK();
+    const newDEKRaw = await Crypto.exportDEK(newDEK);
+    const newDEKB64 = btoa(String.fromCharCode(...newDEKRaw));
+    const newDekEnc   = await Crypto._encrypt(newKEK, newDEKB64, aadD);
+    const newVaultEnc = await Crypto._encrypt(newDEK, State.entries, aadV);
+    const newVerifier = await Crypto._encrypt(newKEK, { ok: true, v: 3 }, aadM);
+    // Validar antes de escribir
+    const tDekB64 = await Crypto._decrypt(newKEK, newDekEnc, aadD);
+    const tDek = await Crypto.importDEK(Uint8Array.from(atob(tDekB64), c=>c.charCodeAt(0)));
+    const tVault = await Crypto._decrypt(tDek, newVaultEnc, aadV);
+    if (!Array.isArray(tVault)) throw new Error('Validación fallida');
+    // Escribir atómicamente
+    Crypto._saveKDFHeader(newHeader);
+    localStorage.setItem(Crypto.DEK_KEY, newDekEnc);
+    localStorage.setItem(Crypto.VAULT_KEY, newVaultEnc);
+    localStorage.setItem(Crypto.META_KEY, newVerifier);
+    State.cryptoKey = newDEK; // State.cryptoKey es ahora la DEK
+    $('modal-change-master').classList.add('hidden');
+    ReauthManager.invalidate(); // HADES-REAUTH: cambio de contraseña es evento de alto riesgo
+    showToast('Contraseña maestra actualizada');
+  } catch {
+    err.textContent = 'Error al cambiar la contraseña. Inténtalo de nuevo.';
+    err.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Guardar';
+  }
 }
 // ── BIND EVENTS ───────────────────────────────────────
 function bindEvents() {
@@ -2195,6 +2207,13 @@ function bindEvents() {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+  // El SW notifica con SW_UPDATED cuando hay una nueva versión activa.
+  // Solo recargamos si la app está en la pantalla de unlock (estado seguro sin datos en vuelo).
+  navigator.serviceWorker.addEventListener('message', e => {
+    if (e.data?.type === 'SW_UPDATED' && document.body.dataset.page === 'unlock') {
+      location.reload();
+    }
   });
 }
 // ── BOOT ─────────────────────────────────────────────
