@@ -39,10 +39,11 @@
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'none';
     script-src 'self';
-    style-src 'self' https://fonts.googleapis.com;
+    style-src 'self' https://fonts.googleapis.com 'unsafe-inline';
     font-src https://fonts.gstatic.com;
     img-src 'self' data:;
-    connect-src 'self';
+    connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com;
+    manifest-src 'self';
     object-src 'none';
     frame-src 'none';
     base-uri 'self';
