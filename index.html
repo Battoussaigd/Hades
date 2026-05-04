@@ -154,25 +154,36 @@
           <h1 class="brand-name">HADES <span>V2</span></h1>
           <p class="brand-sub">Bienvenido, <span id="login-username">Usuario</span></p>
         </div>
-        <div class="field-group">
-          <label>Contraseña maestra</label>
-          <div class="glass-input-wrap">
-            <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" />
-            <button class="eye-btn" data-target="login-password" type="button">
-              <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-            </button>
+        <!-- Modo contraseña -->
+        <div id="login-pw-wrap">
+          <div class="field-group">
+            <label>Contraseña maestra</label>
+            <div class="glass-input-wrap">
+              <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" />
+              <button class="eye-btn" data-target="login-password" type="button">
+                <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
           </div>
+          <p id="login-error" class="error-msg hidden"></p>
+          <div id="login-attempts-wrap" class="attempts-wrap hidden">
+            <p id="login-attempts-msg" class="attempts-msg"></p>
+            <button class="btn-link" id="btn-forgot">¿Olvidaste tu contraseña?</button>
+          </div>
+          <button class="btn-primary full-width" id="btn-login">Entrar</button>
+          <button class="btn-biometric hidden" id="btn-biometric-login">
+            <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 0 1 10 10"/><path d="M12 6a6 6 0 0 1 6 6"/><path d="M12 10a2 2 0 0 1 2 2"/><path d="M2 12a10 10 0 0 0 10 10"/><path d="M6 12a6 6 0 0 0 6 6"/><path d="M10 12a2 2 0 0 0 2 2"/></svg>
+            Usar huella dactilar
+          </button>
         </div>
-        <p id="login-error" class="error-msg hidden"></p>
-        <div id="login-attempts-wrap" class="attempts-wrap hidden">
-          <p id="login-attempts-msg" class="attempts-msg"></p>
-          <button class="btn-link" id="btn-forgot">¿Olvidaste tu contraseña?</button>
+        <!-- Modo solo huella -->
+        <div id="login-bio-only-wrap" class="hidden">
+          <button class="btn-bio-only" id="btn-bio-only-login">
+            <svg viewBox="0 0 24 24" width="48" height="48"><path d="M12 2a10 10 0 0 1 10 10"/><path d="M12 6a6 6 0 0 1 6 6"/><path d="M12 10a2 2 0 0 1 2 2"/><path d="M2 12a10 10 0 0 0 10 10"/><path d="M6 12a6 6 0 0 0 6 6"/><path d="M10 12a2 2 0 0 0 2 2"/></svg>
+            <span>Toca para entrar</span>
+          </button>
+          <button class="btn-link" id="btn-use-password">Usar contraseña</button>
         </div>
-        <button class="btn-primary full-width" id="btn-login">Entrar</button>
-        <button class="btn-biometric hidden" id="btn-biometric-login">
-          <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 0 1 10 10"/><path d="M12 6a6 6 0 0 1 6 6"/><path d="M12 10a2 2 0 0 1 2 2"/><path d="M2 12a10 10 0 0 0 10 10"/><path d="M6 12a6 6 0 0 0 6 6"/><path d="M10 12a2 2 0 0 0 2 2"/></svg>
-          Usar huella dactilar
-        </button>
       </div>
 
       <!-- RECOVERY: Ingreso de frase -->
@@ -368,6 +379,16 @@
                 <button class="btn-secondary" id="btn-bio-register">Configurar</button>
                 <button class="btn-danger-ghost hidden" id="btn-bio-remove">Eliminar</button>
               </div>
+            </div>
+            <div class="setting-row hidden" id="bio-only-row">
+              <div>
+                <div class="setting-label">Solo huella dactilar</div>
+                <div class="setting-sub">Entrar sin escribir contraseña</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="bio-only-toggle" />
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              </label>
             </div>
           </div>
           <div class="glass-card settings-card">

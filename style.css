@@ -510,6 +510,38 @@ svg { display: block; width: 20px; height: 20px; fill: none; stroke: currentColo
 .bio-status { font-size: 0.8rem; color: var(--text-3); }
 .bio-status.active { color: var(--green); }
 
+/* ── Toggle switch ── */
+.toggle-switch { position: relative; display: inline-flex; cursor: pointer; }
+.toggle-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.toggle-track {
+  width: 48px; height: 28px; border-radius: 14px;
+  background: var(--surface-h); border: 1px solid var(--border);
+  transition: background var(--trans), border-color var(--trans);
+  position: relative;
+}
+.toggle-thumb {
+  position: absolute; top: 3px; left: 3px;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: var(--text-3); transition: transform var(--trans), background var(--trans);
+}
+.toggle-switch input:checked + .toggle-track { background: var(--accent); border-color: var(--accent); }
+.toggle-switch input:checked + .toggle-track .toggle-thumb { transform: translateX(20px); background: #fff; }
+
+/* ── Bio-only login button ── */
+.btn-bio-only {
+  width: 100%; padding: 28px 16px; border-radius: var(--radius);
+  background: var(--surface); border: 1.5px solid var(--border);
+  color: var(--text); display: flex; flex-direction: column;
+  align-items: center; gap: 12px; font-size: 1rem; font-weight: 600;
+  transition: background var(--trans), border-color var(--trans), transform var(--trans);
+  cursor: pointer;
+}
+.btn-bio-only:hover { background: var(--surface-h); border-color: var(--accent); transform: translateY(-2px); }
+.btn-bio-only svg { color: var(--accent); stroke: var(--accent); }
+.btn-bio-only.loading { opacity: 0.7; pointer-events: none; }
+#login-bio-only-wrap { display: flex; flex-direction: column; align-items: center; gap: 14px; width: 100%; }
+#login-bio-only-wrap .btn-link { color: var(--text-2); font-size: 0.875rem; }
+
 /* ── Help ── */
 .help-container { display: flex; flex-direction: column; gap: 16px; max-width: 680px; }
 .help-card { padding: 24px; }

@@ -387,15 +387,55 @@ const Biometric = (() => {
     return Crypto.importDEK(dekB64);
   }
 
+  async function registerBioOnly(dek) {
+    const b64    = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+    const bioKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+    const bioKeyB64 = b64(await crypto.subtle.exportKey('raw', bioKey));
+    const dekB64    = await Crypto.exportDEK(dek);
+    const bioOnlyWrap = await Crypto.encrypt(bioKey, dekB64, null);
+    const blobs = await DB.get('crypto_blobs', 'blobs');
+    await DB.put('crypto_blobs', 'blobs', { ...blobs, bioOnlyKeyB64: bioKeyB64, bioOnlyWrap });
+  }
+
+  async function authenticateBioOnly() {
+    if (!isSupported()) throw new Error('WebAuthn no disponible');
+    const blobs = await DB.get('crypto_blobs', 'blobs');
+    if (!blobs?.bioCredentialId || !blobs?.bioOnlyKeyB64 || !blobs?.bioOnlyWrap) {
+      throw new Error('Huella de solo acceso no configurada. Desactiva y vuelve a activar la opción en Ajustes.');
+    }
+    const unb64  = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+    const credId = unb64(blobs.bioCredentialId);
+    await navigator.credentials.get({
+      publicKey: {
+        rpId: RP_ID, challenge: crypto.getRandomValues(new Uint8Array(32)),
+        allowCredentials: [{ id: credId, type: 'public-key' }],
+        userVerification: 'required', timeout: 60000
+      }
+    });
+    const bioKey = await crypto.subtle.importKey(
+      'raw', unb64(blobs.bioOnlyKeyB64), { name: 'AES-GCM', length: 256 }, false, ['decrypt']
+    );
+    const dekB64 = await Crypto.decrypt(bioKey, blobs.bioOnlyWrap, null);
+    return Crypto.importDEK(dekB64);
+  }
+
+  async function unregisterBioOnly() {
+    const blobs = await DB.get('crypto_blobs', 'blobs');
+    if (!blobs) return;
+    const { bioOnlyKeyB64, bioOnlyWrap, ...rest } = blobs;
+    await DB.put('crypto_blobs', 'blobs', rest);
+    setMode('both');
+  }
+
   async function unregister() {
     const blobs = await DB.get('crypto_blobs', 'blobs');
     if (!blobs) return;
-    const { bioCredentialId, bioWrap, ...rest } = blobs;
+    const { bioCredentialId, bioWrap, bioOnlyKeyB64, bioOnlyWrap, ...rest } = blobs;
     await DB.put('crypto_blobs', 'blobs', rest);
     setMode('off');
   }
 
-  return { isSupported, getMode, setMode, hasCredential, register, authenticate, unregister };
+  return { isSupported, getMode, setMode, hasCredential, register, authenticate, registerBioOnly, authenticateBioOnly, unregisterBioOnly, unregister };
 })();
 
 // ─────────────────────────────────────────────
@@ -841,14 +881,27 @@ const App = (() => {
     });
 
     on('btn-biometric-login', 'click', async () => {
+      UI.toast('Ingresa tu contraseña primero. La huella es un segundo factor desde Ajustes.', '');
+    });
+
+    on('btn-bio-only-login', 'click', async () => {
+      const btn = $('btn-bio-only-login');
+      if (btn) btn.classList.add('loading');
       try {
-        const result = await Crypto.verifyPassword('');
-        // For biometric we need kek first — use stored approach
-        // Biometric authenticates then decrypts DEK via bioWrap + kek
-        // Since we need kek to decrypt bioWrap, we ask for password first then bio
-        // This is the conservative design: bio as 2nd factor
-        UI.toast('Para usar huella, ingresa tu contraseña primero y luego configura biometría en Ajustes.', '');
-      } catch {}
+        const dek = await Biometric.authenticateBioOnly();
+        const blobs = await DB.get('crypto_blobs', 'blobs');
+        await enterApp(dek, null, blobs?.user || 'Usuario');
+      } catch (e) {
+        UI.toast(e.message || 'Error de autenticación biométrica', 'error');
+      } finally {
+        if (btn) btn.classList.remove('loading');
+      }
+    });
+
+    on('btn-use-password', 'click', () => {
+      UI.hide('login-bio-only-wrap');
+      UI.show('login-pw-wrap');
+      setTimeout(() => { $('login-password')?.focus(); }, 100);
     });
   }
 
@@ -1165,12 +1218,16 @@ const App = (() => {
   // ── Settings ──
   function updateBioSettings() {
     Biometric.hasCredential().then(has => {
-      const lbl = UI.$('bio-status-label');
-      const reg = UI.$('btn-bio-register');
-      const rem = UI.$('btn-bio-remove');
+      const lbl    = UI.$('bio-status-label');
+      const reg    = UI.$('btn-bio-register');
+      const rem    = UI.$('btn-bio-remove');
+      const row    = UI.$('bio-only-row');
+      const toggle = UI.$('bio-only-toggle');
       if (lbl) { lbl.textContent = has ? 'Configurado' : 'No configurado'; lbl.classList.toggle('active', has); }
       if (reg) reg.classList.toggle('hidden', has);
       if (rem) rem.classList.toggle('hidden', !has);
+      if (row) row.classList.toggle('hidden', !has);
+      if (toggle) toggle.checked = Biometric.getMode() === 'solo';
     });
   }
 
@@ -1221,6 +1278,27 @@ const App = (() => {
       await Biometric.unregister();
       UI.toast('Huella eliminada', 'success');
       updateBioSettings();
+    });
+
+    on('bio-only-toggle', 'change', async () => {
+      const toggle  = UI.$('bio-only-toggle');
+      const wantOn  = toggle?.checked;
+      if (wantOn) {
+        if (!State.dek) { UI.toast('Sesión expirada, reinicia la app.', 'error'); toggle.checked = false; return; }
+        try {
+          await Biometric.registerBioOnly(State.dek);
+          Biometric.setMode('solo');
+          UI.toast('Solo huella activado', 'success');
+        } catch (e) {
+          toggle.checked = false;
+          UI.toast(e.message || 'Error al activar', 'error');
+        }
+      } else {
+        const ok = await Reauth.require('desactivar acceso solo huella');
+        if (!ok) { toggle.checked = true; return; }
+        await Biometric.unregisterBioOnly();
+        UI.toast('Solo huella desactivado', 'success');
+      }
     });
 
     on('btn-export', 'click', () => Backup.exportVault().catch(e => UI.toast(e.message, 'error')));
@@ -1322,8 +1400,16 @@ const App = (() => {
       const header = await DB.get('kdf_header', 'header');
       const loginUsernameEl = UI.$('login-username');
       if (loginUsernameEl) loginUsernameEl.textContent = blobs?.user || 'Usuario';
-      const hasBio = !!(blobs?.bioCredentialId) && Biometric.isSupported() && Biometric.getMode() === 'both';
-      if (hasBio) UI.show('btn-biometric-login');
+      const bioMode = Biometric.getMode();
+      const hasBioCredential = !!(blobs?.bioCredentialId) && Biometric.isSupported();
+      if (hasBioCredential && bioMode === 'solo') {
+        UI.hide('login-pw-wrap');
+        UI.show('login-bio-only-wrap');
+      } else {
+        UI.show('login-pw-wrap');
+        UI.hide('login-bio-only-wrap');
+        if (hasBioCredential && bioMode === 'both') UI.show('btn-biometric-login');
+      }
       UI.setState('state-login');
       setTimeout(() => { UI.$('login-password')?.focus(); }, 100);
     } else {
