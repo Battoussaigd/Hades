@@ -683,8 +683,7 @@ const App = (() => {
     canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;';
     container.insertBefore(canvas, container.querySelector('.grid-overlay'));
 
-    const gl = canvas.getContext('webgl', { preserveDrawingBuffer: true })
-            || canvas.getContext('experimental-webgl', { preserveDrawingBuffer: true });
+    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
     if (!gl) return;
 
     const VS = `attribute vec2 a_pos; void main(){ gl_Position=vec4(a_pos,0,1); }`;
@@ -718,8 +717,8 @@ const App = (() => {
           vec4 c=ac*exp(sin(i*i+iTime*0.8))/length(max(v,vec2(v.x*f*0.015,v.y*1.5)));
           o+=c*(1.0+tn*0.8)*smoothstep(0.0,1.0,i/35.0)*0.6;
         }
-        vec3 col=clamp(o.rgb/100.0,0.0,10.0); col=col*col;
-        gl_FragColor=vec4(tnh(col*1.5)*1.5,1.0);
+        vec3 col=pow(clamp(o.rgb/100.0,0.0001,10.0),vec3(1.6));
+        gl_FragColor=vec4(tnh(col)*1.5,1.0);
       }
     `;
 
@@ -801,18 +800,18 @@ const App = (() => {
     resize();
     window.addEventListener('resize', resize);
 
-    let t = 0, _raf;
-    function draw() {
-      t += 0.016;
-      gl.uniform1f(uni.uTime, t);
+    const t0 = performance.now();
+    let _raf;
+    function draw(now) {
+      gl.uniform1f(uni.uTime, (now - t0) * 0.001);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       _raf = requestAnimationFrame(draw);
     }
-    draw();
+    _raf = requestAnimationFrame(draw);
 
     document.addEventListener('visibilitychange', () => {
-      if (document.hidden) cancelAnimationFrame(_raf);
-      else draw();
+      if (document.hidden) { cancelAnimationFrame(_raf); _raf = null; }
+      else if (!_raf) _raf = requestAnimationFrame(draw);
     });
   }
 
@@ -1557,13 +1556,16 @@ const App = (() => {
       if (hasBioCredential && bioMode === 'solo') {
         UI.hide('login-pw-wrap');
         UI.show('login-bio-only-wrap');
+        UI.setState('state-login');
+        // Auto-trigger fingerprint reader on launch
+        setTimeout(() => { $('btn-bio-only-login')?.click(); }, 400);
       } else {
         UI.show('login-pw-wrap');
         UI.hide('login-bio-only-wrap');
         if (hasBioCredential && bioMode === 'both') UI.show('btn-biometric-login');
+        UI.setState('state-login');
+        setTimeout(() => { UI.$('login-password')?.focus(); }, 100);
       }
-      UI.setState('state-login');
-      setTimeout(() => { UI.$('login-password')?.focus(); }, 100);
     } else {
       UI.setState('state-setup-1');
       setTimeout(() => { UI.$('reg-name')?.focus(); }, 100);

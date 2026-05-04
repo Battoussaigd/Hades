@@ -151,6 +151,7 @@ svg { display: block; width: 20px; height: 20px; fill: none; stroke: currentColo
 .card-sub { font-size: 0.875rem; color: var(--text-2); line-height: 1.5; }
 
 /* ── Form Fields ── */
+#login-pw-wrap { display: flex; flex-direction: column; gap: 16px; }
 .field-group { display: flex; flex-direction: column; gap: 7px; }
 .field-group label { font-size: 0.8125rem; font-weight: 500; color: var(--text-2); }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
