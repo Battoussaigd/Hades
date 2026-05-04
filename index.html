@@ -35,10 +35,6 @@
 
   <!-- ═══════════════ PARALLAX BACKGROUND ═══════════════ -->
   <div class="parallax-bg" id="parallax-bg">
-    <div class="orb orb-1" data-parallax="30"></div>
-    <div class="orb orb-2" data-parallax="20"></div>
-    <div class="orb orb-3" data-parallax="15"></div>
-    <div class="orb orb-4" data-parallax="25"></div>
     <div class="grid-overlay"></div>
   </div>
 
@@ -264,6 +260,7 @@
         </button>
       </div>
     </aside>
+    <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
 
     <main class="main-content">
       <header class="topbar">
@@ -451,6 +448,30 @@
       </div>
 
     </main>
+
+    <!-- Bottom nav (mobile only) -->
+    <nav class="bottom-nav" id="bottom-nav">
+      <button class="bottom-nav-item active" data-view="vault">
+        <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span>Bóveda</span>
+      </button>
+      <button class="bottom-nav-item" data-view="generator">
+        <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <span>Generador</span>
+      </button>
+      <button class="bottom-nav-item" data-view="settings">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>Ajustes</span>
+      </button>
+      <button class="bottom-nav-item" data-view="help">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <span>Ayuda</span>
+      </button>
+      <button class="bottom-nav-item bottom-nav-lock" id="btn-lock-bottom">
+        <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+        <span>Bloquear</span>
+      </button>
+    </nav>
   </div>
 
   <!-- ═══════════════ MODALS ═══════════════ -->

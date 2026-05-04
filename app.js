@@ -570,7 +570,7 @@ const UI = (() => {
       v.classList.toggle('active', isActive);
       v.classList.toggle('hidden', !isActive);
     });
-    document.querySelectorAll('.nav-item[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view));
+    document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view));
     const titles = { vault: 'Bóveda', generator: 'Generador', settings: 'Ajustes', help: 'Ayuda' };
     const el = $('view-title'); if (el) el.textContent = titles[view] || view;
   }
@@ -674,17 +674,151 @@ const App = (() => {
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
   function on(id, ev, fn) { const e = $(id); if (e) e.addEventListener(ev, fn); }
 
-  // ── Parallax ──
-  function initParallax() {
-    const orbs = document.querySelectorAll('[data-parallax]');
-    document.addEventListener('mousemove', e => {
-      const x = (e.clientX / window.innerWidth - 0.5);
-      const y = (e.clientY / window.innerHeight - 0.5);
-      orbs.forEach(o => {
-        const s = parseFloat(o.dataset.parallax);
-        o.style.transform = `translate(${x * s}px, ${y * s}px)`;
-      });
+  // ── Shader Background (dual WebGL programs: aurora dark / stripe light) ──
+  function initShaderBackground() {
+    const container = document.getElementById('parallax-bg');
+    if (!container) return;
+
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;';
+    container.insertBefore(canvas, container.querySelector('.grid-overlay'));
+
+    const gl = canvas.getContext('webgl', { preserveDrawingBuffer: true })
+            || canvas.getContext('experimental-webgl', { preserveDrawingBuffer: true });
+    if (!gl) return;
+
+    const VS = `attribute vec2 a_pos; void main(){ gl_Position=vec4(a_pos,0,1); }`;
+
+    // ── Dark: aurora ──
+    const DARK_FS = `
+      precision mediump float;
+      uniform float iTime; uniform vec2 iResolution;
+      #define NO 3
+      float rand(vec2 n){ return fract(sin(dot(n,vec2(12.9898,4.1414)))*43758.5453); }
+      float noise(vec2 p){
+        vec2 ip=floor(p),u=fract(p); u=u*u*(3.0-2.0*u);
+        return mix(mix(rand(ip),rand(ip+vec2(1,0)),u.x),mix(rand(ip+vec2(0,1)),rand(ip+vec2(1,1)),u.x),u.y);
+      }
+      float fbm(vec2 x){
+        float v=0.0,a=0.3; vec2 sh=vec2(100.0);
+        mat2 r=mat2(cos(0.5),sin(0.5),-sin(0.5),cos(0.5));
+        for(int i=0;i<NO;++i){ v+=a*noise(x); x=r*x*2.0+sh; a*=0.4; } return v;
+      }
+      vec3 tnh(vec3 x){ vec3 e=exp(2.0*clamp(x,-8.0,8.0)); return (e-1.0)/(e+1.0); }
+      void main(){
+        vec2 shake=vec2(sin(iTime*1.2)*0.005,cos(iTime*2.1)*0.005);
+        vec2 p=((gl_FragCoord.xy+shake*iResolution)-iResolution*0.5)/iResolution.y*mat2(6,-4,4,6);
+        vec2 v; vec4 o=vec4(0);
+        float f=2.0+fbm(p+vec2(iTime*5.0,0.0))*0.5;
+        for(float i=0.0;i<35.0;i++){
+          v=p+cos(i*i+(iTime+p.x*0.08)*0.025+i*vec2(13,11))*3.5
+            +vec2(sin(iTime*3.0+i)*0.003,cos(iTime*3.5-i)*0.003);
+          float tn=fbm(v+vec2(iTime*0.5,i))*0.3*(1.0-i/35.0);
+          vec4 ac=vec4(0.1+0.3*sin(i*0.2+iTime*0.4),0.3+0.5*cos(i*0.3+iTime*0.5),0.7+0.3*sin(i*0.4+iTime*0.3),1);
+          vec4 c=ac*exp(sin(i*i+iTime*0.8))/length(max(v,vec2(v.x*f*0.015,v.y*1.5)));
+          o+=c*(1.0+tn*0.8)*smoothstep(0.0,1.0,i/35.0)*0.6;
+        }
+        vec3 col=clamp(o.rgb/100.0,0.0,10.0); col=col*col;
+        gl_FragColor=vec4(tnh(col*1.5)*1.5,1.0);
+      }
+    `;
+
+    // ── Light: stripe gradient (white / cyan #42FFE9 / purple #8106BE) ──
+    const LIGHT_FS = `
+      precision mediump float;
+      uniform float iTime; uniform vec2 iResolution;
+      float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+      float snoise(vec2 p){
+        vec2 i=floor(p),f=fract(p); f=f*f*(3.0-2.0*f);
+        return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
+      }
+      void main(){
+        vec2 uv=gl_FragCoord.xy/iResolution;
+        float n=snoise(uv*3.0+vec2(iTime*0.08,iTime*0.05))*0.08;
+        float t=(uv.x-uv.y+n)*2.2+iTime*0.1;
+        const float PI=3.14159265;
+        float w1=sin(t*PI)*0.5+0.5;
+        float w2=sin(t*PI+2.094)*0.5+0.5;
+        float w3=sin(t*PI+4.189)*0.5+0.5;
+        float ws=w1+w2+w3;
+        vec3 c1=vec3(1.000,1.000,1.000);
+        vec3 c2=vec3(0.259,1.000,0.914);
+        vec3 c3=vec3(0.506,0.024,0.745);
+        vec3 col=(c1*w1+c2*w2+c3*w3)/ws;
+        col=mix(col,vec3(1.0),0.30);
+        gl_FragColor=vec4(col,1.0);
+      }
+    `;
+
+    function mkProg(fs) {
+      function sh(type, src) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src); gl.compileShader(s); return s;
+      }
+      const p = gl.createProgram();
+      gl.attachShader(p, sh(gl.VERTEX_SHADER, VS));
+      gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs));
+      gl.linkProgram(p);
+      return p;
+    }
+
+    const darkProg  = mkProg(DARK_FS);
+    const lightProg = mkProg(LIGHT_FS);
+
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+
+    function activateProg(prog) {
+      gl.useProgram(prog);
+      const loc = gl.getAttribLocation(prog, 'a_pos');
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+      return {
+        uTime: gl.getUniformLocation(prog, 'iTime'),
+        uRes:  gl.getUniformLocation(prog, 'iResolution')
+      };
+    }
+
+    let isLight = document.body.classList.contains('theme-light');
+    let uni = activateProg(isLight ? lightProg : darkProg);
+
+    // Called by applyTheme
+    window._bgSetTheme = (light) => {
+      if (isLight === light) return;
+      isLight = light;
+      uni = activateProg(isLight ? lightProg : darkProg);
+      gl.uniform2f(uni.uRes, canvas.width, canvas.height);
+    };
+
+    function resize() {
+      const pr = Math.min(window.devicePixelRatio, 1.5);
+      canvas.width  = window.innerWidth  * pr;
+      canvas.height = window.innerHeight * pr;
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.uniform2f(uni.uRes, canvas.width, canvas.height);
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    let t = 0, _raf;
+    function draw() {
+      t += 0.016;
+      gl.uniform1f(uni.uTime, t);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      _raf = requestAnimationFrame(draw);
+    }
+    draw();
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) cancelAnimationFrame(_raf);
+      else draw();
     });
+  }
+
+  // ── Parallax (replaced by shader) ──
+  function initParallax() {
+    initShaderBackground();
   }
 
   function initTilt() {
@@ -706,6 +840,7 @@ const App = (() => {
     document.body.classList.toggle('theme-light', t === 'light');
     document.body.classList.toggle('theme-dark',  t !== 'light');
     localStorage.setItem('hades_theme', t);
+    if (window._bgSetTheme) window._bgSetTheme(t === 'light');
     const lb = $('theme-light-btn'); const db = $('theme-dark-btn');
     if (lb) lb.classList.toggle('active', t === 'light');
     if (db) db.classList.toggle('active', t !== 'light');
@@ -727,18 +862,35 @@ const App = (() => {
 
   // ── Sidebar ──
   function initSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const backdrop = document.getElementById('sidebar-backdrop');
+
+    function closeSidebar() {
+      if (sidebar) sidebar.classList.remove('open');
+      if (backdrop) backdrop.classList.remove('active');
+    }
+
     on('sidebar-toggle', 'click', () => {
-      const s = document.getElementById('sidebar');
-      if (s) s.classList.toggle('open');
+      if (!sidebar) return;
+      const isOpen = sidebar.classList.toggle('open');
+      if (backdrop) backdrop.classList.toggle('active', isOpen);
     });
+
+    if (backdrop) backdrop.addEventListener('click', closeSidebar);
+
     document.querySelectorAll('.nav-item[data-view]').forEach(btn => {
       btn.addEventListener('click', () => {
         UI.setView(btn.dataset.view);
-        const s = document.getElementById('sidebar');
-        if (s && window.innerWidth < 640) s.classList.remove('open');
+        closeSidebar();
       });
     });
+
+    document.querySelectorAll('.bottom-nav-item[data-view]').forEach(btn => {
+      btn.addEventListener('click', () => UI.setView(btn.dataset.view));
+    });
+
     on('btn-lock', 'click', lock);
+    on('btn-lock-bottom', 'click', lock);
   }
 
   // ── Auto-lock ──
