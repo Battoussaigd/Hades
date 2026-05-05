@@ -2,7 +2,7 @@
    HADES V2 — Service Worker (Offline First)
    ═══════════════════════════════════════════ */
 
-const CACHE_NAME = 'hades-v2.0.5';
+const CACHE_NAME = 'hades-v2.0.6';
 const ASSETS = [
   '/',
   '/index.html',

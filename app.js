@@ -709,13 +709,13 @@ const App = (() => {
         vec2 p=((gl_FragCoord.xy+shake*iResolution)-iResolution*0.5)/iResolution.y*mat2(6,-4,4,6);
         vec2 v; vec4 o=vec4(0);
         float f=2.0+fbm(p+vec2(iTime*5.0,0.0))*0.5;
-        for(float i=0.0;i<35.0;i++){
+        for(float i=0.0;i<20.0;i++){
           v=p+cos(i*i+(iTime+p.x*0.08)*0.025+i*vec2(13,11))*3.5
             +vec2(sin(iTime*3.0+i)*0.003,cos(iTime*3.5-i)*0.003);
-          float tn=fbm(v+vec2(iTime*0.5,i))*0.3*(1.0-i/35.0);
+          float tn=fbm(v+vec2(iTime*0.5,i))*0.3*(1.0-i/20.0);
           vec4 ac=vec4(0.1+0.3*sin(i*0.2+iTime*0.4),0.3+0.5*cos(i*0.3+iTime*0.5),0.7+0.3*sin(i*0.4+iTime*0.3),1);
           vec4 c=ac*exp(sin(i*i+iTime*0.8))/length(max(v,vec2(v.x*f*0.015,v.y*1.5)));
-          o+=c*(1.0+tn*0.8)*smoothstep(0.0,1.0,i/35.0)*0.6;
+          o+=c*(1.0+tn*0.8)*smoothstep(0.0,1.0,i/20.0)*0.6;
         }
         vec3 col=pow(clamp(o.rgb/100.0,0.0001,10.0),vec3(1.6));
         gl_FragColor=vec4(tnh(col)*1.5,1.0);
@@ -761,8 +761,8 @@ const App = (() => {
       return p;
     }
 
-    const darkProg  = mkProg(DARK_FS);
-    const lightProg = mkProg(LIGHT_FS);
+    // Lazy compilation: compile only initial theme at startup
+    let darkProg = null, lightProg = null;
 
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -780,12 +780,24 @@ const App = (() => {
     }
 
     let isLight = document.body.classList.contains('theme-light');
+    // Compile only the active theme's shader at startup
+    if (isLight) {
+      if (!lightProg) lightProg = mkProg(LIGHT_FS);
+    } else {
+      if (!darkProg) darkProg = mkProg(DARK_FS);
+    }
     let uni = activateProg(isLight ? lightProg : darkProg);
 
     // Called by applyTheme
     window._bgSetTheme = (light) => {
       if (isLight === light) return;
       isLight = light;
+      // Lazy compile the target theme if not already compiled
+      if (isLight) {
+        if (!lightProg) lightProg = mkProg(LIGHT_FS);
+      } else {
+        if (!darkProg) darkProg = mkProg(DARK_FS);
+      }
       uni = activateProg(isLight ? lightProg : darkProg);
       gl.uniform2f(uni.uRes, canvas.width, canvas.height);
     };
