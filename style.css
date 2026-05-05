@@ -57,29 +57,13 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
 input, select, textarea { font-family: inherit; }
 svg { display: block; width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 
-/* ── Shader Background ── */
+/* ── Background ── */
 .parallax-bg {
   position: fixed; inset: 0; z-index: 0;
-  overflow: hidden; pointer-events: none;
+  pointer-events: none;
   background: #0a0814;
 }
-.parallax-bg canvas {
-  position: absolute; inset: 0;
-  width: 100% !important; height: 100% !important;
-  display: block;
-}
-/* Light theme: shader handles it (stripe gradient) */
-.theme-light .parallax-bg { background: #fff; }
-
-.grid-overlay {
-  display: none !important;
-  position: absolute; inset: 0; z-index: 1;
-  background-image:
-    linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
-  background-size: 60px 60px;
-}
-.theme-light .grid-overlay { background-image: linear-gradient(rgba(0,0,0,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(0,0,0,0.03) 1px, transparent 1px); }
+.theme-light .parallax-bg { background: #ffffff; }
 
 /* ── Pages ── */
 .page { position: fixed; inset: 0; z-index: 10; }
