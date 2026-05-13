@@ -1,32 +1,14 @@
 # ═══════════════════════════════════════════════════════
 # HADES — Netlify _headers
 # Security headers para gestor de contraseñas PWA
-# Referencia: OWASP Secure Headers Project
 # ═══════════════════════════════════════════════════════
 
 /*
-  # ── CSP estricta — bloquea XSS, inline scripts, eval, iframes externos ──
   Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'none'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; manifest-src 'self'; worker-src 'self';
-
-  # ── Clickjacking — doble protección CSP frame-ancestors + header legacy ──
   X-Frame-Options: DENY
-
-  # ── MIME sniffing ──
   X-Content-Type-Options: nosniff
-
-  # ── No filtrar el origen en requests externos ──
   Referrer-Policy: no-referrer
-
-  # ── Desactivar features del browser innecesarias para un gestor de contraseñas ──
-  Permissions-Policy: accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), camera=(), display-capture=(), document-domain=(), encrypted-media=(), execution-while-not-rendered=(), execution-while-out-of-viewport=(), fullscreen=(), geolocation=(), gyroscope=(), keyboard-map=(), magnetometer=(), microphone=(), midi=(), navigation-override=(), payment=(), picture-in-picture=(), publickey-credentials-get=(self), screen-wake-lock=(), sync-xhr=(), usb=(), web-share=(), xr-spatial-tracking=()
-
-  # ── HSTS — forzar HTTPS por 1 año, incluir subdomains ──
-  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
-
-  # ── Ocultar tecnología del servidor ──
-  X-Powered-By: 
-
-  # ── Cross-Origin policies — aislamiento adicional ──
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), display-capture=()
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
   Cross-Origin-Opener-Policy: same-origin
-  Cross-Origin-Embedder-Policy: require-corp
   Cross-Origin-Resource-Policy: same-origin
