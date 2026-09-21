@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Hades · Rescate</title>
+<link rel="stylesheet" href="diag.css" />
+</head>
+<body>
+<main>
+  <h1>Hades · Rescate</h1>
+  <p class="sub">Esta pagina solo LEE. No escribe, no borra, no modifica tu boveda.</p>
+
+  <section class="card urgente">
+    <h2>1. Poner tus datos a salvo</h2>
+    <p>Descarga una copia cifrada de tu boveda tal como esta guardada. No necesita tu contrasena ni tu huella, porque no descifra nada: copia el bulto cerrado.</p>
+    <button id="btn-rescate">Descargar respaldo cifrado</button>
+    <p id="rescate-msg" class="msg"></p>
+  </section>
+
+  <section class="card">
+    <h2>2. Que hay en tu boveda</h2>
+    <pre id="estado">Leyendo…</pre>
+  </section>
+
+  <section class="card">
+    <h2>3. Probar la huella</h2>
+    <p>Muestra el error exacto, y avisa si la peticion se queda colgada.</p>
+    <button id="btn-huella">Probar huella</button>
+    <pre id="huella-msg"></pre>
+  </section>
+
+  <section class="card">
+    <h2>4. Revisar tus 12 palabras</h2>
+    <p>Marca en rojo las que no existen en la lista BIP39. Todo ocurre en tu telefono, no se envia nada.</p>
+    <div id="palabras"></div>
+    <button id="btn-palabras">Revisar</button>
+    <pre id="palabras-msg"></pre>
+  </section>
+</main>
+<script src="diag.js"></script>
+</body>
+</html>
