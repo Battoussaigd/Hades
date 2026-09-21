@@ -27,7 +27,26 @@ async function sha256Hex(str) {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-let DB_, HEADER_, BLOBS_, VAULT_;
+let DB_, HEADER_, BLOBS_, VAULT_, ENTRIES_;
+
+// Replicas exactas de Crypto.buildAAD y Crypto.decrypt de app.js, para que
+// la persona dueña de esta boveda pueda volver a leer sus propios datos en
+// su propio dispositivo cuando el lector de huella dejo de responder.
+function buildAAD(h, contexto) {
+  return new TextEncoder().encode(
+    JSON.stringify({ kdf: h.kdf, version: h.version, salt: h.salt, context: contexto }));
+}
+
+async function descifrar(key, blob, aad) {
+  const p = { name: 'AES-GCM', iv: unb64(blob.iv) };
+  if (aad) p.additionalData = aad;
+  const buf = await crypto.subtle.decrypt(p, key, unb64(blob.ct));
+  return JSON.parse(new TextDecoder().decode(buf));
+}
+
+function importarAES(clave) {
+  return crypto.subtle.importKey('raw', unb64(clave), { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+}
 
 async function cargar() {
   const out = [];
@@ -154,6 +173,46 @@ $('btn-palabras').addEventListener('click', async () => {
   out.textContent = malas.length
     ? 'No existen en la lista BIP39:\n' + malas.join('\n')
     : 'Las palabras escritas existen todas en la lista. Si aun asi no abre, el problema es el orden o no es la frase de esta boveda.';
+});
+
+$('btn-abrir').addEventListener('click', async () => {
+  const msg = $('abrir-msg');
+  msg.className = 'msg'; msg.textContent = 'Abriendo…';
+  try {
+    if (!BLOBS_?.bioOnlyKeyB64 || !BLOBS_?.bioOnlyWrap) throw new Error('faltan bioOnlyKeyB64 o bioOnlyWrap');
+    if (!HEADER_ || !VAULT_) throw new Error('falta el header o el vault');
+    const bioKey = await importarAES(BLOBS_.bioOnlyKeyB64);
+    const dekB64 = await descifrar(bioKey, BLOBS_.bioOnlyWrap, null);
+    const dek    = await importarAES(dekB64);
+    ENTRIES_     = await descifrar(dek, VAULT_, buildAAD(HEADER_, 'vault'));
+    msg.className = 'msg ok';
+    msg.textContent = 'Abierta. ' + ENTRIES_.length + ' entradas recuperadas.';
+    $('acciones').classList.remove('oculto');
+  } catch (e) {
+    msg.className = 'msg bad';
+    msg.textContent = 'No se pudo: ' + (e.name || '') + ' — ' + (e.message || '');
+  }
+});
+
+$('btn-ver').addEventListener('click', () => {
+  if (!ENTRIES_) return;
+  $('lista').textContent = ENTRIES_.map((e, i) => {
+    const campos = Object.entries(e)
+      .filter(([k]) => k !== 'type')
+      .map(([k, v]) => '   ' + k + ': ' + (typeof v === 'string' ? v : JSON.stringify(v)))
+      .join('\n');
+    return (i + 1) + '. [' + (e.type || 'entrada') + ']\n' + campos;
+  }).join('\n\n');
+});
+
+$('btn-bajar').addEventListener('click', () => {
+  if (!ENTRIES_) return;
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(ENTRIES_, null, 2)], { type: 'application/json' }));
+  const a = document.createElement('a');
+  a.href = url; a.download = 'hades-EN-CLARO-' + Date.now() + '.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
 });
 
 cargar();
