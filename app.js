@@ -1416,7 +1416,9 @@ const App = (() => {
         UI.show('login-bio-only-wrap');
         UI.setState('state-login');
         // Auto-trigger fingerprint reader on launch
-        setTimeout(() => { $('btn-bio-only-login')?.click(); }, 400);
+        // Sin auto-disparo: WebAuthn exige un gesto real de la persona, y el click
+        // programatico dejaba el boton con la clase 'loading' (pointer-events: none)
+        // colgado para siempre, volviendolo intocable.
       } else {
         UI.show('login-pw-wrap');
         UI.hide('login-bio-only-wrap');
