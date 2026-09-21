@@ -32,9 +32,16 @@ self.addEventListener('activate', event => {
   );
 });
 
+const SIN_RED = () => new Response('Sin conexion', {
+  status: 503,
+  headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+});
+
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
-  if (!event.request.url.startsWith('http')) return;
+  // Solo mismo origen. Las fuentes de Google las pide el navegador directo:
+  // si pasaran por aqui, connect-src las bloquearia y caerian al catch.
+  if (new URL(event.request.url).origin !== self.location.origin) return;
 
   event.respondWith(
     caches.match(event.request).then(cached => {
@@ -44,9 +51,13 @@ self.addEventListener('fetch', event => {
         const clone = response.clone();
         caches.open(CACHE_NAME).then(c => c.put(event.request, clone));
         return response;
-      }).catch(() => {
-        if (event.request.mode === 'navigate') return caches.match('/index.html');
       });
+    }).catch(() => {
+      // respondWith SIEMPRE tiene que recibir un Response, pase lo que pase.
+      if (event.request.mode === 'navigate') {
+        return caches.match('/index.html').then(fallback => fallback || SIN_RED());
+      }
+      return SIN_RED();
     })
   );
 });
